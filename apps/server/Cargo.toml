@@ -1,0 +1,22 @@
+[package]
+name = "erpcons-office-server"
+description = "ERPCons Office online server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+office-api.workspace = true
+office-db.workspace = true
+office-documents.workspace = true
+office-identity.workspace = true
+office-storage.workspace = true
+axum.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

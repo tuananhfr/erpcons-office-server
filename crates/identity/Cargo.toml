@@ -1,0 +1,31 @@
+[package]
+name = "office-identity"
+description = "Resolves PI ID access tokens to Office actors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+# Signs a user in on an in-process pi-mock (`testing::access_token`); enabled only by dev-dependencies.
+testing = ["dep:pi-mock", "dep:base64", "reqwest/form", "reqwest/query"]
+
+[dependencies]
+async-trait.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tracing.workspace = true
+base64 = { workspace = true, optional = true }
+pi-mock = { workspace = true, optional = true }
+
+[dev-dependencies]
+office-identity = { path = ".", features = ["testing"] }
+pi-mock.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

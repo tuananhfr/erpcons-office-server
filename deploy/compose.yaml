@@ -1,0 +1,45 @@
+# Production stack on the shared host (plan §8), in /srv/erpcons-office-server/ next to a `.env`
+# made from `.env.example`. Apache proxies /api/ to 127.0.0.1:8710; nothing else is published.
+name: erpcons-office-server
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    mem_limit: 2g
+    environment:
+      POSTGRES_DB: erpcons_office
+      POSTGRES_USER: erpcons_office
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U erpcons_office -d erpcons_office"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  server:
+    image: erpcons-office-server:${SERVER_TAG:?set SERVER_TAG in .env}
+    restart: unless-stopped
+    mem_limit: 2g
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://erpcons_office:${POSTGRES_PASSWORD}@postgres:5432/erpcons_office
+      PI_BASE_URL: ${PI_BASE_URL:?set PI_BASE_URL in .env}
+      ERPCONS_DB_MAX_CONNECTIONS: ${ERPCONS_DB_MAX_CONNECTIONS:-10}
+      ERPCONS_QUOTA_BYTES: ${ERPCONS_QUOTA_BYTES:-1073741824}
+      ERPCONS_MAX_FILE_BYTES: ${ERPCONS_MAX_FILE_BYTES:-104857600}
+      ERPCONS_TRUST_FORWARDED_FOR: ${ERPCONS_TRUST_FORWARDED_FOR:-true}
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+    ports:
+      - "127.0.0.1:8710:8710"
+    volumes:
+      # Document bytes, apart from the database so they can be backed up on their own.
+      - objects:/data
+
+volumes:
+  pgdata:
+  objects:

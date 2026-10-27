@@ -1,0 +1,17 @@
+[package]
+name = "office-documents"
+description = "Document service of the Office online server: authorization and quota"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+office-identity.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+time.workspace = true
+
+[lints]
+workspace = true

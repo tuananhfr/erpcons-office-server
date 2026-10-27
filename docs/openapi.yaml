@@ -1,0 +1,565 @@
+openapi: 3.1.0
+info:
+  title: ERPCons Office Online API
+  version: 0.1.0-draft
+  description: |
+    Phase 0–1 of the online tier (ERPCONS OFFICE ONLINE V3.0 §05, §07, §08): documents, folders, immutable versions,
+    trash, quota. Served on the site's origin under `/api/v1`, so browsers need no CORS.
+
+    **Authentication.** Every operation except `/health` takes the user's PI ID access token as
+    `Authorization: Bearer`. The server resolves it to an actor (`actor_id` = PI `sub`) through its identity verifier;
+    until PI Platform offers resource-server verification, that is `GET /v1/me` on PI (see
+    `erpcons-office/docs/pi-integration/resource-server-auth.md`).
+
+    **Authorization.** Phase 1: only the owner can see or change a document or folder. Anything the caller may not see
+    answers 404, never 403, so existence is not revealed (§08).
+
+    **Errors** share one body (`Error`). `message_vi` is ready to show; clients branch on `code` only.
+
+    **Idempotency.** `POST` operations take `Idempotency-Key` (1–100 chars); a repeat with the same key and body within
+    24 h returns the first response, a repeat with a different body answers 422 `IDEMPOTENCY_MISMATCH`.
+
+    **Logging.** The server never logs titles, folder names, bytes or tokens.
+servers:
+  - url: /api/v1
+security:
+  - piBearer: []
+tags:
+  - name: account
+    description: The calling actor.
+  - name: folders
+    description: Folder tree of one owner.
+  - name: documents
+    description: Documents, their versions and the trash.
+  - name: ops
+    description: Operations endpoints.
+paths:
+  /health:
+    get:
+      operationId: health
+      tags: [ops]
+      security: []
+      summary: Liveness and readiness (database and storage reachable)
+      responses:
+        '200':
+          description: Ready.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { const: ok }
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /me:
+    get:
+      operationId: getMe
+      tags: [account]
+      summary: The calling actor and its quota
+      responses:
+        '200':
+          description: The actor.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /folders/{folder_id}/children:
+    get:
+      operationId: listChildren
+      tags: [folders]
+      summary: Folders and documents directly inside a folder (`root` for the top level)
+      parameters:
+        - name: folder_id
+          in: path
+          required: true
+          schema:
+            oneOf:
+              - { const: root }
+              - { $ref: '#/components/schemas/Id' }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: One page, folders first, then documents, each sorted by name.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [folders, documents, next_cursor]
+                properties:
+                  folders:
+                    type: array
+                    items: { $ref: '#/components/schemas/Folder' }
+                  documents:
+                    type: array
+                    items: { $ref: '#/components/schemas/Document' }
+                  next_cursor: { type: [string, 'null'] }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /folders:
+    post:
+      operationId: createFolder
+      summary: Create a folder (in the root when parent_id is null)
+      tags: [folders]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                parent_id: { oneOf: [{ $ref: '#/components/schemas/Id' }, { type: 'null' }] }
+                name: { $ref: '#/components/schemas/Name' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Folder' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /folders/{folder_id}:
+    parameters:
+      - $ref: '#/components/parameters/FolderId'
+    patch:
+      operationId: updateFolder
+      tags: [folders]
+      summary: Rename or move. Moving into itself or a descendant answers 422 `FOLDER_CYCLE`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                name: { $ref: '#/components/schemas/Name' }
+                parent_id: { oneOf: [{ $ref: '#/components/schemas/Id' }, { type: 'null' }] }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Folder' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+    delete:
+      operationId: trashFolder
+      tags: [folders]
+      summary: Move the folder and everything in it to the trash
+      responses:
+        '204': { description: Trashed. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /folders/{folder_id}/restore:
+    parameters:
+      - $ref: '#/components/parameters/FolderId'
+    post:
+      operationId: restoreFolder
+      tags: [folders]
+      summary: Restore from the trash (into the root when the former parent is gone or trashed)
+      responses:
+        '200':
+          description: Restored.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Folder' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /documents:
+    post:
+      operationId: createDocument
+      tags: [documents]
+      summary: Create a document from an uploaded file, or a blank one of a kind. Version 1 is durable on 201.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  contentMediaType: application/octet-stream
+                  description: docx, xlsx, pptx or pdf in phase 1, checked by signature (same table as the site's intake contract).
+                title: { $ref: '#/components/schemas/Name' }
+                folder_id: { $ref: '#/components/schemas/Id' }
+          application/json:
+            schema:
+              type: object
+              required: [kind]
+              properties:
+                kind: { $ref: '#/components/schemas/Kind' }
+                title: { $ref: '#/components/schemas/Name' }
+                folder_id: { oneOf: [{ $ref: '#/components/schemas/Id' }, { type: 'null' }] }
+      responses:
+        '201':
+          description: Created.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Document' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /documents/{document_id}:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    get:
+      operationId: getDocument
+      summary: Document metadata
+      tags: [documents]
+      responses:
+        '200':
+          description: Metadata.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Document' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      operationId: updateDocument
+      tags: [documents]
+      summary: Rename or move to another folder (does not create a version)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                title: { $ref: '#/components/schemas/Name' }
+                folder_id: { oneOf: [{ $ref: '#/components/schemas/Id' }, { type: 'null' }] }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Document' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+    delete:
+      operationId: trashDocument
+      summary: Move a document to the trash
+      tags: [documents]
+      responses:
+        '204': { description: Trashed. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /documents/{document_id}/restore:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    post:
+      operationId: restoreDocument
+      summary: Restore a document from the trash (into the root when its folder is gone or trashed)
+      tags: [documents]
+      responses:
+        '200':
+          description: Restored.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Document' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /documents/{document_id}/content:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    get:
+      operationId: getContent
+      tags: [documents]
+      summary: Bytes of the current version
+      responses:
+        '200':
+          description: The file.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+            X-Document-Version: { $ref: '#/components/headers/X-Document-Version' }
+          content:
+            application/octet-stream:
+              schema: { type: string, contentMediaType: application/octet-stream }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      operationId: saveContent
+      tags: [documents]
+      summary: Save a new immutable version. 200 means durable (§07, §11); nothing is written on any error.
+      parameters:
+        - name: If-Match
+          in: header
+          required: true
+          description: ETag of the version the edit is based on. Missing answers 428 `PRECONDITION_REQUIRED`.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, contentMediaType: application/octet-stream }
+      responses:
+        '200':
+          description: Saved.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Document' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`VERSION_CONFLICT`: the current version is not the one in `If-Match`.'
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Error'
+                  - type: object
+                    required: [latest_version]
+                    properties:
+                      latest_version: { type: integer, minimum: 1 }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '428': { $ref: '#/components/responses/PreconditionRequired' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /documents/{document_id}/versions:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    get:
+      operationId: listVersions
+      tags: [documents]
+      summary: Versions, newest first (restore comes in phase 2)
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: One page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [versions, next_cursor]
+                properties:
+                  versions:
+                    type: array
+                    items: { $ref: '#/components/schemas/Version' }
+                  next_cursor: { type: [string, 'null'] }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /trash:
+    get:
+      operationId: listTrash
+      tags: [documents]
+      summary: Trashed folders and documents, most recently trashed first. Purged 30 days after trashing.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: One page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [folders, documents, next_cursor]
+                properties:
+                  folders:
+                    type: array
+                    items: { $ref: '#/components/schemas/Folder' }
+                  documents:
+                    type: array
+                    items: { $ref: '#/components/schemas/Document' }
+                  next_cursor: { type: [string, 'null'] }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+components:
+  securitySchemes:
+    piBearer:
+      type: http
+      scheme: bearer
+      description: PI ID access token (opaque to Office).
+  parameters:
+    DocumentId:
+      name: document_id
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Id' }
+    FolderId:
+      name: folder_id
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Id' }
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string, maxLength: 200 }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 100 }
+  headers:
+    ETag:
+      description: Opaque, strong; changes with every version.
+      schema: { type: string }
+    X-Document-Version:
+      description: The version `seq` the bytes belong to.
+      schema: { type: integer, minimum: 1 }
+  schemas:
+    Id:
+      type: string
+      format: uuid
+    Name:
+      type: string
+      minLength: 1
+      maxLength: 255
+      description: Trimmed; no control or bidi characters, no `/` or `\`.
+    Kind:
+      type: string
+      enum: [word, sheet, slide, pdf]
+    State:
+      type: string
+      enum: [ACTIVE, TRASHED]
+      description: DRAFT, PURGE_PENDING and PURGED (§07) exist in the database but are never returned.
+    SaveState:
+      type: string
+      enum: [SERVER_DURABLE]
+      description: Phase 1 only returns durable versions; NAS_PENDING / NAS_SYNCED come with NAS (§11).
+    Me:
+      type: object
+      required: [actor_id, display_name, quota]
+      properties:
+        actor_id: { type: string }
+        display_name: { type: string }
+        quota:
+          type: object
+          required: [used_bytes, limit_bytes, max_file_bytes]
+          properties:
+            used_bytes: { type: integer, minimum: 0, description: 'Sum of all versions not purged, deduplicated by checksum.' }
+            limit_bytes: { type: integer, minimum: 0 }
+            max_file_bytes: { type: integer, minimum: 0 }
+    Folder:
+      type: object
+      required: [id, parent_id, name, state, created_at, updated_at]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        parent_id: { oneOf: [{ $ref: '#/components/schemas/Id' }, { type: 'null' }] }
+        name: { $ref: '#/components/schemas/Name' }
+        state: { $ref: '#/components/schemas/State' }
+        trashed_at: { type: [string, 'null'], format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Document:
+      type: object
+      required: [id, folder_id, title, kind, format, size, version, save_state, state, created_at, updated_at]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        folder_id: { oneOf: [{ $ref: '#/components/schemas/Id' }, { type: 'null' }] }
+        title: { $ref: '#/components/schemas/Name' }
+        kind: { $ref: '#/components/schemas/Kind' }
+        format: { type: string, enum: [docx, xlsx, pptx, pdf] }
+        size: { type: integer, minimum: 0, description: Bytes of the current version. }
+        version: { type: integer, minimum: 1 }
+        save_state: { $ref: '#/components/schemas/SaveState' }
+        state: { $ref: '#/components/schemas/State' }
+        trashed_at: { type: [string, 'null'], format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Version:
+      type: object
+      required: [version, size, sha256, author_name, created_at]
+      properties:
+        version: { type: integer, minimum: 1 }
+        size: { type: integer, minimum: 0 }
+        sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        author_name: { type: string, description: Display name snapshot taken when the version was saved (§06). }
+        created_at: { type: string, format: date-time }
+    Error:
+      type: object
+      required: [code, message_vi, request_id, retryable]
+      properties:
+        code:
+          type: string
+          enum:
+            - UNAUTHENTICATED
+            - NOT_FOUND
+            - NAME_TAKEN
+            - FOLDER_CYCLE
+            - VERSION_CONFLICT
+            - PRECONDITION_REQUIRED
+            - QUOTA_EXCEEDED
+            - TOO_LARGE
+            - UNSUPPORTED_TYPE
+            - INVALID_SIGNATURE
+            - INVALID_REQUEST
+            - IDEMPOTENCY_MISMATCH
+            - RATE_LIMITED
+            - UNAVAILABLE
+        message_vi: { type: string }
+        request_id: { type: string }
+        retryable: { type: boolean }
+  responses:
+    Unauthorized:
+      description: '`UNAUTHENTICATED`: missing, expired or rejected token. The client refreshes once, then asks to sign in.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: '`NOT_FOUND`: does not exist, is purged, or is not the caller''s. Never distinguished.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: '`NAME_TAKEN`: a folder with that name already exists in the same parent.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    TooLarge:
+      description: '`TOO_LARGE` (over the per-file limit) or `QUOTA_EXCEEDED` (over the actor''s total).'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unprocessable:
+      description: '`UNSUPPORTED_TYPE`, `INVALID_SIGNATURE`, `FOLDER_CYCLE`, `INVALID_REQUEST` or `IDEMPOTENCY_MISMATCH`.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    PreconditionRequired:
+      description: '`PRECONDITION_REQUIRED`: `If-Match` is missing.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    TooManyRequests:
+      description: '`RATE_LIMITED`, with `Retry-After`.'
+      headers:
+        Retry-After:
+          schema: { type: integer, minimum: 1 }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ServiceUnavailable:
+      description: '`UNAVAILABLE`: database or storage unreachable; `retryable` is true.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }

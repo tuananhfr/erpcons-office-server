@@ -1,0 +1,24 @@
+[package]
+name = "office-db"
+description = "Postgres pool, migrations and queries of the Office online server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+# Fresh per-test databases (`testing::TestDb`); enabled only by dev-dependencies.
+testing = ["dep:tokio"]
+
+[dependencies]
+sqlx.workspace = true
+uuid.workspace = true
+tokio = { workspace = true, features = ["rt"], optional = true }
+
+[dev-dependencies]
+office-db = { path = ".", features = ["testing"] }
+time.workspace = true
+tokio ={ workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

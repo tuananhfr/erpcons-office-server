@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = ["apps/server", "crates/api", "crates/db", "crates/documents", "crates/identity", "crates/storage"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.dependencies]
+office-api = { path = "crates/api" }
+office-db = { path = "crates/db" }
+office-documents = { path = "crates/documents" }
+office-identity = { path = "crates/identity" }
+office-storage = { path = "crates/storage" }
+
+async-trait = "0.1.92"
+axum = "0.8.9"
+base64 = "0.23.1"
+hex = "0.4.3"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls-no-provider"] }
+# ring rather than reqwest's default aws-lc-rs: no C/cmake toolchain for the musl build, licences pass deny.toml.
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.10.9"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate", "uuid", "time"] }
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+time = { version = "0.3.55", features = ["serde", "formatting"] }
+tokio = "1.54.1"
+tower = "0.5.3"
+tower-http = { version = "0.7.1", features = ["trace", "set-header"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+uuid = { version = "1.29.0", features = ["v4", "v7"] }
+
+pi-mock = { git = "https://github.com/tuananhfr/erpcons-account", tag = "v0.1.1" }

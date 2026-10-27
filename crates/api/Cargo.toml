@@ -1,0 +1,34 @@
+[package]
+name = "office-api"
+description = "HTTP gateway of the Office online server (/api/v1)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+office-db.workspace = true
+office-documents.workspace = true
+office-identity.workspace = true
+office-storage.workspace = true
+axum.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tower-http.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+office-db = { workspace = true, features = ["testing"] }
+office-identity = { workspace = true, features = ["testing"] }
+pi-mock.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+serde_json.workspace = true
+sqlx.workspace = true
+tempfile.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
