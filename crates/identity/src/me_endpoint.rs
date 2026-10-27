@@ -106,8 +106,14 @@ impl MeEndpointVerifier {
             warn!("PI /v1/me returned an unreadable body");
             VerifyError::Unavailable
         })?;
-        if body.status.as_deref() == Some("suspended") {
-            return Err(VerifyError::Unauthenticated);
+        // Allowlist: a missing or unknown status breaks the contract and must never let a caller in.
+        match body.status.as_deref() {
+            Some("active") => {}
+            Some("suspended") => return Err(VerifyError::Unauthenticated),
+            _ => {
+                warn!("PI /v1/me returned no usable account status");
+                return Err(VerifyError::Unavailable);
+            }
         }
         if body.user_id.is_empty() || body.user_id.len() > MAX_ACTOR_ID_LEN {
             warn!("PI /v1/me returned an unusable user_id");

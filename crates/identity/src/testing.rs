@@ -1,8 +1,13 @@
-//! Test helpers: sign a user in on an in-process `pi_mock::Server` and get an access token.
+//! Test helpers: sign a user in on an in-process `pi_mock::Server` and get an access token, or
+//! stand in for PI with a fixed `/v1/me` body.
+mod stub_me;
+
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::{Url, header::LOCATION, redirect};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+
+pub use stub_me::{StubMe, stub_me};
 
 const CLIENT_ID: &str = "erpcons-office-web";
 

@@ -1,0 +1,6 @@
+# LF everywhere, whatever core.autocrlf says on the Windows host (scripts run in Linux containers).
+* text=auto eol=lf
+*.docx binary
+*.xlsx binary
+*.pptx binary
+*.pdf binary

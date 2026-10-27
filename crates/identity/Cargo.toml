@@ -7,8 +7,9 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
-# Signs a user in on an in-process pi-mock (`testing::access_token`); enabled only by dev-dependencies.
-testing = ["dep:pi-mock", "dep:base64", "reqwest/form", "reqwest/query"]
+# Signs a user in on an in-process pi-mock (`testing::access_token`) or stubs `/v1/me`
+# (`testing::stub_me`); enabled only by dev-dependencies.
+testing = ["dep:pi-mock", "dep:base64", "dep:tokio", "reqwest/form", "reqwest/query"]
 
 [dependencies]
 async-trait.workspace = true
@@ -21,6 +22,7 @@ time.workspace = true
 tracing.workspace = true
 base64 = { workspace = true, optional = true }
 pi-mock = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["io-util", "net", "rt"] }
 
 [dev-dependencies]
 office-identity = { path = ".", features = ["testing"] }

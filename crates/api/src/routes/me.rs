@@ -38,6 +38,7 @@ pub(crate) async fn get(
         actor_id: Some(&actor.actor_id),
         tenant_id: None,
         document_id: None,
+        folder_id: None,
         action: "me.read",
         outcome: Outcome::Success,
         trace_id: request_id.as_str(),

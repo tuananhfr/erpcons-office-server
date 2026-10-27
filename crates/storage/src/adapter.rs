@@ -1,4 +1,4 @@
-use std::pin::Pin;
+use std::{pin::Pin, time::SystemTime};
 
 use async_trait::async_trait;
 use tokio::io::AsyncRead;
@@ -29,6 +29,8 @@ pub struct PutOutcome {
 pub struct ObjectMeta {
     pub key: ObjectKey,
     pub size: u64,
+    /// Last write, or last time a `put` of the same content found it (orphan sweep age).
+    pub modified: Option<SystemTime>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

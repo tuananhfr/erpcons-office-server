@@ -1,7 +1,8 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use office_identity::{
-    IdentityVerifier, MeEndpointConfig, MeEndpointVerifier, VerifyError, testing::access_token,
+    IdentityVerifier, MeEndpointConfig, MeEndpointVerifier, VerifyError,
+    testing::{access_token, stub_me},
 };
 use pi_mock::{DEFAULT_USER, Fault, Scenario, Server};
 use time::OffsetDateTime;
@@ -145,4 +146,33 @@ async fn unreachable_pi_is_unavailable() {
         verifier.verify("some-token").await,
         Err(VerifyError::Unavailable)
     );
+}
+
+#[tokio::test]
+async fn missing_or_unknown_account_status_is_unavailable() {
+    let bodies = [
+        r#"{"user_id":"pi-user-x","display_name":"X"}"#,
+        r#"{"user_id":"pi-user-x","display_name":"X","status":null}"#,
+        r#"{"user_id":"pi-user-x","display_name":"X","status":"pending"}"#,
+        r#"{"user_id":"pi-user-x","display_name":"X","status":"Active"}"#,
+    ];
+    for body in bodies {
+        let stub = stub_me(body).await;
+        let verifier =
+            MeEndpointVerifier::new(MeEndpointConfig::new(stub.base_url())).expect("verifier");
+        assert_eq!(
+            verifier.verify("some-token").await,
+            Err(VerifyError::Unavailable),
+            "{body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_stub_passes_an_active_account() {
+    let stub = stub_me(r#"{"user_id":"pi-user-x","display_name":"X","status":"active"}"#).await;
+    let verifier =
+        MeEndpointVerifier::new(MeEndpointConfig::new(stub.base_url())).expect("verifier");
+    let actor = verifier.verify("some-token").await.expect("verified");
+    assert_eq!(actor.actor_id, "pi-user-x");
 }

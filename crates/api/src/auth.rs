@@ -42,6 +42,7 @@ async fn record_failure(state: &AppState, request_id: Option<&RequestId>, error:
         actor_id: None,
         tenant_id: None,
         document_id: None,
+        folder_id: None,
         action: "auth.verify",
         outcome: match error {
             VerifyError::Unauthenticated => Outcome::Denied,

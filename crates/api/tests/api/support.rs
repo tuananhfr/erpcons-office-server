@@ -1,14 +1,28 @@
 //! A real server on a random port, a fresh database and an in-process pi-mock per test.
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
-use office_api::{ApiConfig, AppState, router};
+use office_api::{ApiConfig, AppState, RateConfig, router};
 use office_db::{PgPool, PoolConfig, testing::TestDb};
-use office_identity::{MeEndpointConfig, MeEndpointVerifier, testing::access_token};
+use office_documents::{
+    Documents,
+    intake::testing::{ZipEntry, zip},
+};
+use office_identity::{
+    MeEndpointConfig, MeEndpointVerifier,
+    testing::{access_token, access_token_as},
+};
 use office_storage::FsStorage;
-use pi_mock::{Scenario, Server};
-use reqwest::{Response, header::AUTHORIZATION};
+use pi_mock::{Scenario, Server, User};
+use reqwest::{Method, RequestBuilder, Response, header::AUTHORIZATION};
 use serde_json::Value;
 use tempfile::TempDir;
+use uuid::Uuid;
+
+/// Far above what any test sends, so only the rate-limit tests meet a limit.
+const UNLIMITED: RateConfig = RateConfig {
+    burst: 100_000,
+    per_second: 100_000.0,
+};
 
 pub struct Setup {
     pub api: ApiConfig,
@@ -21,6 +35,7 @@ pub struct TestApp {
     pub http: reqwest::Client,
     base: String,
     pool: PgPool,
+    state: AppState,
     // Dropped last: drops the database.
     _db: Option<TestDb>,
 }
@@ -48,7 +63,11 @@ impl TestApp {
     async fn start(pool: PgPool, db: Option<TestDb>, tweak: impl FnOnce(&mut Setup)) -> Self {
         let pi = Server::start(Scenario::default());
         let mut setup = Setup {
-            api: ApiConfig::default(),
+            api: ApiConfig {
+                ip_rate: UNLIMITED,
+                actor_rate: UNLIMITED,
+                ..ApiConfig::default()
+            },
             identity: MeEndpointConfig::new(pi.base_url()),
         };
         tweak(&mut setup);
@@ -67,7 +86,7 @@ impl TestApp {
             .await
             .expect("bind");
         let address = listener.local_addr().expect("address");
-        let app = router(state).into_make_service_with_connect_info::<SocketAddr>();
+        let app = router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
         tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
         Self {
             pi,
@@ -75,12 +94,22 @@ impl TestApp {
             http: reqwest::Client::new(),
             base: format!("http://{address}"),
             pool,
+            state,
             _db: db,
         }
     }
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// The document service behind the routes, for running jobs and arming fail points.
+    pub fn documents(&self) -> &Arc<Documents> {
+        self.state.documents()
+    }
+
+    pub fn store_dir(&self) -> PathBuf {
+        self.data.path().join("store")
     }
 
     pub fn url(&self, path: &str) -> String {
@@ -91,18 +120,210 @@ impl TestApp {
         access_token(&self.pi).await
     }
 
+    /// Token of another PI user, added to the scenario.
+    pub async fn token_of(&self, user_id: &str, display_name: &str) -> String {
+        let user = User {
+            user_id: user_id.into(),
+            display_name: display_name.into(),
+            email: None,
+            suspended: false,
+            memberships: Vec::new(),
+        };
+        self.pi.update_scenario(|s| s.users.push(user));
+        access_token_as(&self.pi, user_id).await
+    }
+
     pub async fn get(&self, path: &str) -> Response {
         self.http.get(self.url(path)).send().await.expect("request")
     }
 
     pub async fn get_as(&self, path: &str, token: &str) -> Response {
-        self.http
-            .get(self.url(path))
-            .header(AUTHORIZATION, format!("Bearer {token}"))
+        self.request(Method::GET, path, token)
             .send()
             .await
             .expect("request")
     }
+
+    pub fn request(&self, method: Method, path: &str, token: &str) -> RequestBuilder {
+        self.http
+            .request(method, self.url(path))
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+    }
+
+    pub async fn send_json(
+        &self,
+        method: Method,
+        path: &str,
+        token: &str,
+        body: &Value,
+    ) -> Response {
+        self.request(method, path, token)
+            .json(body)
+            .send()
+            .await
+            .expect("request")
+    }
+
+    /// POST with a fresh `Idempotency-Key`.
+    pub async fn post_json(&self, path: &str, token: &str, body: &Value) -> Response {
+        self.post_json_keyed(path, token, &new_key(), body).await
+    }
+
+    pub async fn post_json_keyed(
+        &self,
+        path: &str,
+        token: &str,
+        key: &str,
+        body: &Value,
+    ) -> Response {
+        self.request(Method::POST, path, token)
+            .header("idempotency-key", key)
+            .json(body)
+            .send()
+            .await
+            .expect("request")
+    }
+
+    pub async fn create_folder(&self, token: &str, parent: Option<&str>, name: &str) -> Value {
+        let response = self
+            .post_json(
+                "/api/v1/folders",
+                token,
+                &serde_json::json!({ "parent_id": parent, "name": name }),
+            )
+            .await;
+        ok_json(response, 201).await
+    }
+
+    pub async fn create_blank(
+        &self,
+        token: &str,
+        kind: &str,
+        title: Option<&str>,
+        folder: Option<&str>,
+    ) -> Value {
+        let body = serde_json::json!({ "kind": kind, "title": title, "folder_id": folder });
+        ok_json(self.post_json("/api/v1/documents", token, &body).await, 201).await
+    }
+
+    /// Multipart upload of `bytes` named `file_name`, with optional extra text fields.
+    pub async fn upload(
+        &self,
+        token: &str,
+        file_name: &str,
+        bytes: &[u8],
+        fields: &[(&str, &str)],
+    ) -> Response {
+        self.upload_keyed(token, &new_key(), file_name, bytes, fields)
+            .await
+    }
+
+    pub async fn upload_keyed(
+        &self,
+        token: &str,
+        key: &str,
+        file_name: &str,
+        bytes: &[u8],
+        fields: &[(&str, &str)],
+    ) -> Response {
+        let (content_type, body) = multipart(fields, Some((file_name, bytes)));
+        self.request(Method::POST, "/api/v1/documents", token)
+            .header("idempotency-key", key)
+            .header("content-type", content_type)
+            .body(body)
+            .send()
+            .await
+            .expect("request")
+    }
+
+    pub async fn put_content(
+        &self,
+        token: &str,
+        id: &str,
+        etag: Option<&str>,
+        bytes: Vec<u8>,
+    ) -> Response {
+        let mut request = self.request(
+            Method::PUT,
+            &format!("/api/v1/documents/{id}/content"),
+            token,
+        );
+        if let Some(etag) = etag {
+            request = request.header("if-match", etag);
+        }
+        request.body(bytes).send().await.expect("request")
+    }
+
+    pub async fn count(&self, sql: &str) -> i64 {
+        sqlx::query_scalar(sql)
+            .fetch_one(self.pool())
+            .await
+            .expect("count query")
+    }
+}
+
+pub fn new_key() -> String {
+    Uuid::new_v4().to_string()
+}
+
+/// A `multipart/form-data` body: text fields first, then the file part.
+pub fn multipart(fields: &[(&str, &str)], file: Option<(&str, &[u8])>) -> (String, Vec<u8>) {
+    let boundary = "office-test-boundary-5d1c";
+    let mut body = Vec::new();
+    for (name, value) in fields {
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\ncontent-disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+            )
+            .as_bytes(),
+        );
+    }
+    if let Some((file_name, bytes)) = file {
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\ncontent-disposition: form-data; name=\"file\"; filename=\"{file_name}\"\r\ncontent-type: application/octet-stream\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+/// A minimal OOXML-shaped ZIP; `marker` makes its bytes (and sha256) distinct.
+pub fn docx(marker: &str) -> Vec<u8> {
+    zip(&[
+        ZipEntry::stored("[Content_Types].xml", b"<Types/>"),
+        ZipEntry::stored("word/document.xml", marker.as_bytes()),
+    ])
+}
+
+pub fn pdf(marker: &str) -> Vec<u8> {
+    format!("%PDF-1.4\n% {marker}\n%%EOF\n").into_bytes()
+}
+
+/// Files under the object store, temp area excluded.
+pub fn stored_objects(root: &std::path::Path) -> usize {
+    fn walk(dir: &std::path::Path, out: &mut usize) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if entry.file_name() != "tmp" {
+                    walk(&path, out);
+                }
+            } else {
+                *out += 1;
+            }
+        }
+    }
+    let mut n = 0;
+    walk(root, &mut n);
+    n
 }
 
 pub fn request_id(response: &Response) -> String {
@@ -115,8 +336,39 @@ pub fn request_id(response: &Response) -> String {
         .to_owned()
 }
 
+pub fn etag(response: &Response) -> String {
+    response
+        .headers()
+        .get("etag")
+        .expect("ETag")
+        .to_str()
+        .expect("ascii")
+        .to_owned()
+}
+
+/// Asserts the status and returns the JSON body.
+pub async fn ok_json(response: Response, status: u16) -> Value {
+    let actual = response.status().as_u16();
+    let text = response.text().await.expect("body");
+    assert_eq!(actual, status, "{text}");
+    serde_json::from_str(&text).expect("JSON body")
+}
+
 /// Checks the contract's `Error` body and returns it.
 pub async fn expect_error(response: Response, status: u16, code: &str, retryable: bool) -> Value {
+    let body = error_body(response, status, code, retryable).await;
+    assert_eq!(body.as_object().map(|o| o.len()), Some(4), "{body}");
+    body
+}
+
+/// A `VERSION_CONFLICT` body; returns its `latest_version`.
+pub async fn expect_conflict(response: Response) -> i64 {
+    let body = error_body(response, 409, "VERSION_CONFLICT", false).await;
+    assert_eq!(body.as_object().map(|o| o.len()), Some(5), "{body}");
+    body["latest_version"].as_i64().expect("latest_version")
+}
+
+async fn error_body(response: Response, status: u16, code: &str, retryable: bool) -> Value {
     assert_eq!(response.status().as_u16(), status);
     let id = request_id(&response);
     let body: Value = response.json().await.expect("JSON error body");
@@ -124,6 +376,5 @@ pub async fn expect_error(response: Response, status: u16, code: &str, retryable
     assert_eq!(body["retryable"], retryable, "{body}");
     assert_eq!(body["request_id"], id.as_str(), "{body}");
     assert!(body["message_vi"].as_str().is_some_and(|m| !m.is_empty()));
-    assert_eq!(body.as_object().map(|o| o.len()), Some(4), "{body}");
     body
 }

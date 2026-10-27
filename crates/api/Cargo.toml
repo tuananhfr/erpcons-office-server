@@ -12,21 +12,27 @@ office-documents.workspace = true
 office-identity.workspace = true
 office-storage.workspace = true
 axum.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+multer.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+time.workspace = true
 tokio = { workspace = true, features = ["time"] }
+tokio-util.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 office-db = { workspace = true, features = ["testing"] }
+office-documents = { workspace = true, features = ["testing"] }
 office-identity = { workspace = true, features = ["testing"] }
 pi-mock.workspace = true
-reqwest = { workspace = true, features = ["json"] }
-serde_json.workspace = true
+reqwest = { workspace = true, features = ["json", "stream"] }
 sqlx.workspace = true
 tempfile.workspace = true
-time.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
 tracing-subscriber.workspace = true
 

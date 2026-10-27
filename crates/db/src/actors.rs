@@ -1,8 +1,8 @@
-use sqlx::PgPool;
+use sqlx::PgExecutor;
 
 /// Records that `actor_id` was seen now, creating it on first sight. Returns `true` when created.
 pub async fn upsert_seen(
-    pool: &PgPool,
+    db: impl PgExecutor<'_>,
     actor_id: &str,
     display_name: &str,
 ) -> Result<bool, sqlx::Error> {
@@ -15,6 +15,6 @@ pub async fn upsert_seen(
     )
     .bind(actor_id)
     .bind(display_name)
-    .fetch_one(pool)
+    .fetch_one(db)
     .await
 }

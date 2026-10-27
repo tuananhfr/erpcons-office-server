@@ -1,0 +1,41 @@
+{
+  "source": "erpcons-office/src/lib/files/intake-contract.ts (SIGNATURES, SIGNATURE_RULES, signatureFailure)",
+  "head_bytes": 1024,
+  "signatures": {
+    "zip": { "magic": "504b0304", "within": 0 },
+    "ole": { "magic": "d0cf11e0a1b11ae1", "within": 0 },
+    "rtf": { "magic": "7b5c727466", "within": 0 },
+    "pdf": { "magic": "255044462d", "within": 1019 }
+  },
+  "site_rules": {
+    "docx": ["zip", "ole", "rtf"],
+    "xlsx": ["zip", "ole"],
+    "pptx": ["zip"],
+    "pdf": ["pdf"]
+  },
+  "server_rules": {
+    "docx": ["zip"],
+    "xlsx": ["zip"],
+    "pptx": ["zip"],
+    "pdf": ["pdf"]
+  },
+  "cases": [
+    { "ext": "docx", "hex": "504b030414000600", "site": "accept", "server": "accept" },
+    { "ext": "xlsx", "hex": "504b030414000600", "site": "accept", "server": "accept" },
+    { "ext": "pptx", "hex": "504b030414000600", "site": "accept", "server": "accept" },
+    { "ext": "pdf", "hex": "255044462d312e370a", "site": "accept", "server": "accept" },
+    { "ext": "pdf", "pad": 1019, "hex": "255044462d", "site": "accept", "server": "accept" },
+    { "ext": "pdf", "pad": 1020, "hex": "255044462d", "site": "INVALID_SIGNATURE", "server": "INVALID_SIGNATURE" },
+    { "ext": "docx", "hex": "d0cf11e0a1b11ae1", "site": "accept", "server": "UNSUPPORTED_TYPE" },
+    { "ext": "xlsx", "hex": "d0cf11e0a1b11ae1", "site": "accept", "server": "UNSUPPORTED_TYPE" },
+    { "ext": "pptx", "hex": "d0cf11e0a1b11ae1", "site": "UNSUPPORTED_TYPE", "server": "UNSUPPORTED_TYPE" },
+    { "ext": "docx", "hex": "7b5c72746631", "site": "accept", "server": "UNSUPPORTED_TYPE" },
+    { "ext": "xlsx", "hex": "7b5c72746631", "site": "INVALID_SIGNATURE", "server": "INVALID_SIGNATURE" },
+    { "ext": "docx", "hex": "255044462d312e37", "site": "INVALID_SIGNATURE", "server": "INVALID_SIGNATURE" },
+    { "ext": "pdf", "hex": "504b030414000600", "site": "INVALID_SIGNATURE", "server": "INVALID_SIGNATURE" },
+    { "ext": "pdf", "hex": "d0cf11e0a1b11ae1", "site": "INVALID_SIGNATURE", "server": "INVALID_SIGNATURE" },
+    { "ext": "docx", "hex": "", "site": "INVALID_SIGNATURE", "server": "INVALID_SIGNATURE" },
+    { "ext": "docx", "hex": "504b03", "site": "INVALID_SIGNATURE", "server": "INVALID_SIGNATURE" },
+    { "ext": "pptx", "hex": "4d5a90004e6f74", "site": "INVALID_SIGNATURE", "server": "INVALID_SIGNATURE" }
+  ]
+}

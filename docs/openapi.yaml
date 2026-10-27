@@ -14,10 +14,14 @@ info:
     **Authorization.** Phase 1: only the owner can see or change a document or folder. Anything the caller may not see
     answers 404, never 403, so existence is not revealed (§08).
 
-    **Errors** share one body (`Error`). `message_vi` is ready to show; clients branch on `code` only.
+    **Errors** share one body (`Error`). `message_vi` is ready to show; clients branch on `code` only. A malformed
+    body, path or query answers 422 `INVALID_REQUEST`, a body over the limit 413 `TOO_LARGE`, a method a path does not
+    have 405 `METHOD_NOT_ALLOWED`.
 
-    **Idempotency.** `POST` operations take `Idempotency-Key` (1–100 chars); a repeat with the same key and body within
-    24 h returns the first response, a repeat with a different body answers 422 `IDEMPOTENCY_MISMATCH`.
+    **Idempotency.** The create operations take `Idempotency-Key` (1–100 chars); a repeat with the same key and body
+    within 24 h returns the first response, a repeat with a different body answers 422 `IDEMPOTENCY_MISMATCH`, a repeat
+    while the first is still running 503 `UNAVAILABLE` (retryable). Restore, trash and save need no key: repeating them
+    is harmless (restoring an active item returns it, trashing a trashed one is a no-op, a repeated save fails `If-Match`).
 
     **Logging.** The server never logs titles, folder names, bytes or tokens.
 servers:
@@ -175,6 +179,7 @@ paths:
               schema: { $ref: '#/components/schemas/Folder' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /documents:
     post:
       operationId: createDocument
@@ -516,6 +521,7 @@ components:
             - IDEMPOTENCY_MISMATCH
             - RATE_LIMITED
             - UNAVAILABLE
+            - METHOD_NOT_ALLOWED
         message_vi: { type: string }
         request_id: { type: string }
         retryable: { type: boolean }

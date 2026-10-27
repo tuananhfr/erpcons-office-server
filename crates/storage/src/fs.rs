@@ -1,6 +1,7 @@
 use std::{
     io,
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 use async_trait::async_trait;
@@ -91,12 +92,20 @@ impl FsStorage {
         let key = ObjectKey::new(sha256.to_hex());
         let path = self.object_path(&sha256);
         if fs::try_exists(&path).await? {
-            return Ok(PutOutcome {
-                key,
-                sha256,
-                size,
-                deduplicated: true,
-            });
+            // A fresh mtime keeps the orphan sweep away until the caller has recorded the object.
+            match touch(&path).await {
+                Ok(()) => {
+                    return Ok(PutOutcome {
+                        key,
+                        sha256,
+                        size,
+                        deduplicated: true,
+                    });
+                }
+                // Swept since the check: store this copy instead.
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
         }
         let shard = path.parent().unwrap_or(&self.root);
         fs::create_dir_all(shard).await?;
@@ -145,6 +154,7 @@ impl StorageAdapter for FsStorage {
             Ok(meta) => Ok(Some(ObjectMeta {
                 key: key.clone(),
                 size: meta.len(),
+                modified: meta.modified().ok(),
             })),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
@@ -269,6 +279,11 @@ async fn sorted_names(dir: &Path) -> io::Result<Vec<String>> {
     }
     names.sort();
     Ok(names)
+}
+
+async fn touch(path: &Path) -> io::Result<()> {
+    let file = fs::OpenOptions::new().write(true).open(path).await?;
+    file.into_std().await.set_modified(SystemTime::now())
 }
 
 async fn remove_if_exists(path: &Path) -> io::Result<()> {

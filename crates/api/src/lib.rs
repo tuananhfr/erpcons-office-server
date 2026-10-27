@@ -6,9 +6,13 @@ mod bearer;
 mod body_limit;
 mod client_ip;
 mod config;
+mod dto;
 mod error;
+mod extract;
+mod idempotency;
 mod rate_limit;
 mod request_id;
+mod requests;
 mod routes;
 mod state;
 mod trace;
@@ -18,7 +22,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{HeaderValue, header::CACHE_CONTROL},
     middleware::{from_fn, from_fn_with_state},
-    routing::get,
+    routing::{get, patch, post},
 };
 use tower_http::set_header::SetResponseHeaderLayer;
 
@@ -33,7 +37,41 @@ pub fn router(state: AppState) -> Router {
     let body_limit = usize::try_from(state.config.max_body_bytes).unwrap_or(usize::MAX);
     let api = Router::new()
         .route("/health", get(routes::health::get))
-        .route("/me", get(routes::me::get));
+        .route("/me", get(routes::me::get))
+        .route("/folders", post(routes::folders::create))
+        .route(
+            "/folders/{folder_id}",
+            patch(routes::folders::update).delete(routes::folders::trash),
+        )
+        .route(
+            "/folders/{folder_id}/children",
+            get(routes::folders::children),
+        )
+        .route(
+            "/folders/{folder_id}/restore",
+            post(routes::folders::restore),
+        )
+        .route("/documents", post(routes::upload::create))
+        .route(
+            "/documents/{document_id}",
+            get(routes::documents::get)
+                .patch(routes::documents::update)
+                .delete(routes::documents::trash),
+        )
+        .route(
+            "/documents/{document_id}/restore",
+            post(routes::documents::restore),
+        )
+        .route(
+            "/documents/{document_id}/content",
+            get(routes::content::get).put(routes::content::put),
+        )
+        .route(
+            "/documents/{document_id}/versions",
+            get(routes::documents::versions),
+        )
+        .route("/trash", get(routes::trash::list))
+        .method_not_allowed_fallback(routes::method_not_allowed);
     Router::new()
         .nest("/api/v1", api)
         .fallback(routes::not_found)

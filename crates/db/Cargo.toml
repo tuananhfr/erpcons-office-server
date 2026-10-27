@@ -12,12 +12,12 @@ testing = ["dep:tokio"]
 
 [dependencies]
 sqlx.workspace = true
+time.workspace = true
 uuid.workspace = true
 tokio = { workspace = true, features = ["rt"], optional = true }
 
 [dev-dependencies]
 office-db = { path = ".", features = ["testing"] }
-time.workspace = true
 tokio ={ workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]

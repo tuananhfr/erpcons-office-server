@@ -256,3 +256,36 @@ async fn health_and_capabilities() {
     std::fs::remove_dir_all(&root).expect("remove");
     assert!(store.health().await.is_err());
 }
+
+#[tokio::test]
+async fn storing_equal_content_again_refreshes_its_modification_time() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FsStorage::open(dir.path()).await.expect("open");
+    let out = store
+        .put(source(b"aged"), PutOptions::default())
+        .await
+        .expect("put");
+    let hex = out.key.as_str().to_owned();
+    let path = dir
+        .path()
+        .join("objects")
+        .join(&hex[..2])
+        .join(&hex[2..4])
+        .join(&hex);
+    let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("open object")
+        .set_modified(two_hours_ago)
+        .expect("age it");
+    let aged = store.head(&out.key).await.expect("head").expect("exists");
+    assert!(aged.modified.expect("mtime") <= two_hours_ago);
+    let again = store
+        .put(source(b"aged"), PutOptions::default())
+        .await
+        .expect("put");
+    assert!(again.deduplicated);
+    let fresh = store.head(&out.key).await.expect("head").expect("exists");
+    assert!(fresh.modified.expect("mtime") > two_hours_ago);
+}

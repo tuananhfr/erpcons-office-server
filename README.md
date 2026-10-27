@@ -5,16 +5,18 @@ site's own origin (`office.erpcons.vn`, Apache reverse proxy to `127.0.0.1:8710`
 
 - Contract: [`docs/openapi.yaml`](docs/openapi.yaml) (source of truth for paths, error body and codes).
 - Plan and decisions: `erpcons-workspace/tmp/briefs/office-online-v1/plan.md`, ADR `online-tier.md` in `erpcons-office`.
-- Status: milestone 1, the skeleton. `GET /api/v1/health` and `GET /api/v1/me`, plus the pieces the document API
-  (milestone 2) builds on.
+- Status: milestone 2, the document API. Health and `/me` (milestone 1), folders, documents (upload, blank, content,
+  save with `If-Match`, versions), trash, plus the purge and orphan jobs.
+- Known limit: `Idempotency-Key` stores the response after the create commits. If the server dies in between, the
+  key's claim lapses after 60 s and a repeat creates a second item instead of replaying the first.
 
 ## Layout
 
 | Path | Role |
 |---|---|
-| `apps/server` | Binary: configuration from the environment, start-up (migrations), graceful shutdown |
-| `crates/api` | axum router, `Error` body, request id, bearer auth, per-IP and per-actor rate limits, body limit, audit writer, tracing |
-| `crates/documents` | Document service: `authorize` (deny by default, owner only), quota rules |
+| `apps/server` | Binary: configuration from the environment, start-up (migrations), background jobs, graceful shutdown |
+| `crates/api` | axum router and thin handlers, `Error` body (also for framework rejections), request id, bearer auth, rate and body limits, `Idempotency-Key`, tracing |
+| `crates/documents` | Document service: `authorize` (deny by default, owner only), folders and documents, durable save, quota, intake checks (signature, ZIP bomb), purge and orphan jobs, blank templates in `templates/` |
 | `crates/identity` | `IdentityVerifier`; `MeEndpointVerifier` asks PI `GET /v1/me` and caches 60 s by token hash |
 | `crates/storage` | `StorageAdapter`; `FsStorage` stores objects by sha256 (temp file, fsync, verify, rename) |
 | `crates/db` | sqlx Postgres pool, migrations in `crates/db/migrations/` (run at start-up), queries |
@@ -35,6 +37,9 @@ site's own origin (`office.erpcons.vn`, Apache reverse proxy to `127.0.0.1:8710`
 | `ERPCONS_RATE_IP_BURST` / `ERPCONS_RATE_IP_PER_SEC` | `300` / `30` | Per client address |
 | `ERPCONS_RATE_ACTOR_BURST` / `ERPCONS_RATE_ACTOR_PER_SEC` | `120` / `10` | Per actor |
 | `ERPCONS_TRUST_FORWARDED_FOR` | `true` | Client address from the last `X-Forwarded-For` entry (Apache) |
+| `ERPCONS_PURGE_INTERVAL_SECS` / `ERPCONS_ORPHAN_INTERVAL_SECS` | `3600` / `3600` | Job intervals; `0` turns a job off |
+| `ERPCONS_TRASH_RETENTION_DAYS` | `30` | Trashed items stay restorable this long, then are purged |
+| `ERPCONS_ORPHAN_MIN_AGE_SECS` | `3600` (at least `60`) | Stored bytes with no row are deleted once this old |
 | `RUST_LOG` | `info,sqlx=warn` | Log filter |
 
 ## Tests
@@ -52,6 +57,10 @@ The script starts (or reuses) the container `erpcons-office-pg-test` (`postgres:
 tag `v0.1.1`).
 
 Licences and advisories: `cargo deny check` (permissive licences only, as in the forks).
+
+The upload signature rules are shared with the site: `crates/documents/tests/intake_vectors.json` is compared with
+`erpcons-office/src/lib/files/intake-contract.ts` (sibling checkout; `ERPCONS_SITE_INTAKE_CONTRACT` overrides the
+path). Blank templates are made with the forks' CLIs: see `crates/documents/templates/README.md`.
 
 ## Image and deploy
 

@@ -2,8 +2,13 @@ use std::{net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
 
 use office_api::{ApiConfig, RateConfig};
 use office_db::PoolConfig;
-use office_documents::QuotaConfig;
+use office_documents::{
+    QuotaConfig,
+    jobs::{OrphanConfig, PurgeConfig},
+};
 use office_identity::MeEndpointConfig;
+
+use crate::jobs::JobsConfig;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub(crate) enum ConfigError {
@@ -21,6 +26,7 @@ pub(crate) struct ServerConfig {
     pub bind: SocketAddr,
     pub identity: MeEndpointConfig,
     pub api: ApiConfig,
+    pub jobs: JobsConfig,
 }
 
 impl ServerConfig {
@@ -86,15 +92,20 @@ impl ServerConfig {
             trust_forwarded_for: vars.parsed("ERPCONS_TRUST_FORWARDED_FOR", true)?,
         };
 
+        let jobs = vars.jobs()?;
+
         Ok(Self {
             db,
             data_dir: PathBuf::from(vars.required("ERPCONS_DATA_DIR")?),
             bind: vars.parsed("ERPCONS_BIND", SocketAddr::from(([127, 0, 0, 1], 8710)))?,
             identity,
             api,
+            jobs,
         })
     }
 }
+
+const MIN_ORPHAN_AGE_SECS: u64 = 60;
 
 struct Vars<F>(F);
 
@@ -112,6 +123,34 @@ impl<F: Fn(&str) -> Option<String>> Vars<F> {
             None => Ok(default),
             Some(v) => v.trim().parse().map_err(|_| ConfigError::Invalid(name)),
         }
+    }
+
+    fn jobs(&self) -> Result<JobsConfig, ConfigError> {
+        let every = |name: &'static str| -> Result<Option<Duration>, ConfigError> {
+            let secs: u64 = self.parsed(name, 3600)?;
+            Ok((secs > 0).then(|| Duration::from_secs(secs)))
+        };
+        let days: u64 = self.parsed("ERPCONS_TRASH_RETENTION_DAYS", 30)?;
+        if days == 0 {
+            return Err(ConfigError::Invalid("ERPCONS_TRASH_RETENTION_DAYS"));
+        }
+        let min_age: u64 = self.parsed("ERPCONS_ORPHAN_MIN_AGE_SECS", 3600)?;
+        // Younger objects may belong to a save still between its put and its commit.
+        if min_age < MIN_ORPHAN_AGE_SECS {
+            return Err(ConfigError::Invalid("ERPCONS_ORPHAN_MIN_AGE_SECS"));
+        }
+        Ok(JobsConfig {
+            purge_every: every("ERPCONS_PURGE_INTERVAL_SECS")?,
+            purge: PurgeConfig {
+                retention: Duration::from_secs(days.saturating_mul(24 * 3600)),
+                ..PurgeConfig::default()
+            },
+            orphans_every: every("ERPCONS_ORPHAN_INTERVAL_SECS")?,
+            orphans: OrphanConfig {
+                min_age: Duration::from_secs(min_age),
+                ..OrphanConfig::default()
+            },
+        })
     }
 
     fn rate(
@@ -165,6 +204,10 @@ mod tests {
         assert!(c.api.trust_forwarded_for);
         assert_eq!(c.identity.base_url, "https://id.pi.example");
         assert_eq!(c.data_dir, PathBuf::from("/data"));
+        assert_eq!(c.jobs.purge_every, Some(Duration::from_secs(3600)));
+        assert_eq!(c.jobs.purge.retention, Duration::from_secs(30 * 24 * 3600));
+        assert_eq!(c.jobs.orphans_every, Some(Duration::from_secs(3600)));
+        assert_eq!(c.jobs.orphans.min_age, Duration::from_secs(3600));
     }
 
     #[test]
@@ -178,6 +221,10 @@ mod tests {
             ("ERPCONS_RATE_ACTOR_PER_SEC", "0.5"),
             ("ERPCONS_TRUST_FORWARDED_FOR", "false"),
             ("ERPCONS_PI_TIMEOUT_MS", "1500"),
+            ("ERPCONS_PURGE_INTERVAL_SECS", "600"),
+            ("ERPCONS_ORPHAN_INTERVAL_SECS", "0"),
+            ("ERPCONS_TRASH_RETENTION_DAYS", "7"),
+            ("ERPCONS_ORPHAN_MIN_AGE_SECS", "7200"),
         ])
         .expect("config");
         assert_eq!(c.bind.port(), 8710);
@@ -194,6 +241,10 @@ mod tests {
         );
         assert!(!c.api.trust_forwarded_for);
         assert_eq!(c.identity.timeout, Duration::from_millis(1500));
+        assert_eq!(c.jobs.purge_every, Some(Duration::from_secs(600)));
+        assert_eq!(c.jobs.orphans_every, None, "0 turns the sweep off");
+        assert_eq!(c.jobs.purge.retention, Duration::from_secs(7 * 24 * 3600));
+        assert_eq!(c.jobs.orphans.min_age, Duration::from_secs(7200));
     }
 
     #[test]
@@ -218,6 +269,9 @@ mod tests {
             ("ERPCONS_RATE_IP_BURST", "0"),
             ("ERPCONS_MAX_BODY_BYTES", "10"),
             ("PI_BASE_URL", "ftp://pi"),
+            ("ERPCONS_TRASH_RETENTION_DAYS", "0"),
+            ("ERPCONS_ORPHAN_MIN_AGE_SECS", "59"),
+            ("ERPCONS_PURGE_INTERVAL_SECS", "-1"),
         ] {
             assert_eq!(
                 load(&[bad]).err(),

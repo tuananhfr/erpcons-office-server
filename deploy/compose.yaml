@@ -33,6 +33,12 @@ services:
       ERPCONS_QUOTA_BYTES: ${ERPCONS_QUOTA_BYTES:-1073741824}
       ERPCONS_MAX_FILE_BYTES: ${ERPCONS_MAX_FILE_BYTES:-104857600}
       ERPCONS_TRUST_FORWARDED_FOR: ${ERPCONS_TRUST_FORWARDED_FOR:-true}
+      # Background jobs (seconds; 0 turns a job off). Trash is restorable for the retention, then purged.
+      ERPCONS_PURGE_INTERVAL_SECS: ${ERPCONS_PURGE_INTERVAL_SECS:-3600}
+      ERPCONS_ORPHAN_INTERVAL_SECS: ${ERPCONS_ORPHAN_INTERVAL_SECS:-3600}
+      ERPCONS_TRASH_RETENTION_DAYS: ${ERPCONS_TRASH_RETENTION_DAYS:-30}
+      # Stored bytes with no row are deleted once this old (at least 60).
+      ERPCONS_ORPHAN_MIN_AGE_SECS: ${ERPCONS_ORPHAN_MIN_AGE_SECS:-3600}
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     ports:
       - "127.0.0.1:8710:8710"

@@ -149,3 +149,32 @@ async fn pi_timeout_is_503_retryable() {
     let response = app.get_as("/api/v1/me", &token).await;
     expect_error(response, 503, "UNAVAILABLE", true).await;
 }
+
+#[tokio::test]
+async fn a_missing_or_unknown_account_status_is_503_and_creates_no_actor() {
+    for body in [
+        r#"{"user_id":"pi-user-x","display_name":"X"}"#,
+        r#"{"user_id":"pi-user-x","display_name":"X","status":"pending"}"#,
+    ] {
+        let stub = office_identity::testing::stub_me(body).await;
+        let base = stub.base_url().to_owned();
+        let Some(app) = TestApp::spawn_with(|s| {
+            s.identity = office_identity::MeEndpointConfig::new(base);
+        })
+        .await
+        else {
+            return;
+        };
+        let response = app.get_as("/api/v1/me", "some-token").await;
+        expect_error(response, 503, "UNAVAILABLE", true).await;
+        let folder = app
+            .post_json("/api/v1/folders", "some-token", &json!({ "name": "x" }))
+            .await;
+        expect_error(folder, 503, "UNAVAILABLE", true).await;
+        let actors: i64 = sqlx::query_scalar("SELECT count(*) FROM actors")
+            .fetch_one(app.pool())
+            .await
+            .expect("count");
+        assert_eq!(actors, 0, "{body}");
+    }
+}

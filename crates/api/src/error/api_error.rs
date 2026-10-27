@@ -6,6 +6,7 @@ use axum::{
     },
     response::{IntoResponse, Response},
 };
+use office_documents::DocError;
 use serde::Serialize;
 use tracing::error;
 
@@ -17,6 +18,7 @@ use crate::request_id;
 pub struct ApiError {
     code: ErrorCode,
     retry_after_secs: Option<u64>,
+    latest_version: Option<i32>,
 }
 
 #[derive(Serialize)]
@@ -25,6 +27,8 @@ struct ErrorBody<'a> {
     message_vi: &'static str,
     request_id: &'a str,
     retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latest_version: Option<i32>,
 }
 
 impl ApiError {
@@ -32,13 +36,26 @@ impl ApiError {
         Self {
             code,
             retry_after_secs: None,
+            latest_version: None,
         }
     }
 
     pub fn rate_limited(retry_after_secs: u64) -> Self {
+        Self::retry_after(ErrorCode::RateLimited, retry_after_secs)
+    }
+
+    pub fn retry_after(code: ErrorCode, secs: u64) -> Self {
         Self {
-            code: ErrorCode::RateLimited,
-            retry_after_secs: Some(retry_after_secs.max(1)),
+            retry_after_secs: Some(secs.max(1)),
+            ..Self::new(code)
+        }
+    }
+
+    /// 409 `VERSION_CONFLICT` naming the version the client must reload.
+    pub fn version_conflict(latest_version: i32) -> Self {
+        Self {
+            latest_version: Some(latest_version),
+            ..Self::new(ErrorCode::VersionConflict)
         }
     }
 
@@ -59,6 +76,26 @@ impl From<ErrorCode> for ApiError {
     }
 }
 
+impl From<DocError> for ApiError {
+    fn from(err: DocError) -> Self {
+        let code = match err {
+            DocError::VersionConflict { latest_version } => {
+                return Self::version_conflict(latest_version);
+            }
+            DocError::NotFound => ErrorCode::NotFound,
+            DocError::NameTaken => ErrorCode::NameTaken,
+            DocError::FolderCycle => ErrorCode::FolderCycle,
+            DocError::QuotaExceeded => ErrorCode::QuotaExceeded,
+            DocError::TooLarge => ErrorCode::TooLarge,
+            DocError::UnsupportedType => ErrorCode::UnsupportedType,
+            DocError::InvalidSignature => ErrorCode::InvalidSignature,
+            DocError::InvalidRequest => ErrorCode::InvalidRequest,
+            DocError::Unavailable => ErrorCode::Unavailable,
+        };
+        Self::new(code)
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let request_id = request_id::current();
@@ -67,6 +104,7 @@ impl IntoResponse for ApiError {
             message_vi: self.code.message_vi(),
             request_id: request_id.as_ref().map_or("", |id| id.as_str()),
             retryable: self.code.retryable(),
+            latest_version: self.latest_version,
         };
         let mut response = (self.code.status(), Json(body)).into_response();
         let headers = response.headers_mut();

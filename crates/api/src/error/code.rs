@@ -19,10 +19,11 @@ pub enum ErrorCode {
     IdempotencyMismatch,
     RateLimited,
     Unavailable,
+    MethodNotAllowed,
 }
 
 impl ErrorCode {
-    pub const ALL: [ErrorCode; 14] = [
+    pub const ALL: [ErrorCode; 15] = [
         Self::Unauthenticated,
         Self::NotFound,
         Self::NameTaken,
@@ -37,6 +38,7 @@ impl ErrorCode {
         Self::IdempotencyMismatch,
         Self::RateLimited,
         Self::Unavailable,
+        Self::MethodNotAllowed,
     ];
 
     pub fn status(self) -> StatusCode {
@@ -53,6 +55,7 @@ impl ErrorCode {
             | Self::IdempotencyMismatch => StatusCode::UNPROCESSABLE_ENTITY,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
         }
     }
 
@@ -74,6 +77,7 @@ impl ErrorCode {
             Self::IdempotencyMismatch => "Yêu cầu này trùng mã với một yêu cầu khác đã gửi.",
             Self::RateLimited => "Bạn thao tác quá nhanh. Vui lòng thử lại sau giây lát.",
             Self::Unavailable => "Máy chủ đang tạm thời gián đoạn. Vui lòng thử lại sau.",
+            Self::MethodNotAllowed => "Thao tác này không được hỗ trợ ở địa chỉ này.",
         }
     }
 
@@ -121,6 +125,7 @@ mod tests {
         assert_eq!(ErrorCode::IdempotencyMismatch.status(), 422);
         assert_eq!(ErrorCode::RateLimited.status(), 429);
         assert_eq!(ErrorCode::Unavailable.status(), 503);
+        assert_eq!(ErrorCode::MethodNotAllowed.status(), 405);
     }
 
     #[test]

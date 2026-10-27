@@ -24,13 +24,16 @@ async fn folder(
     name: &str,
 ) -> Result<Uuid, sqlx::Error> {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO folders (id, owner_id, parent_id, name) VALUES ($1, $2, $3, $4)")
-        .bind(id)
-        .bind(owner)
-        .bind(parent)
-        .bind(name)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "INSERT INTO folders (id, owner_id, parent_id, name, name_key) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(id)
+    .bind(owner)
+    .bind(parent)
+    .bind(name)
+    .bind(name.to_lowercase())
+    .execute(pool)
+    .await?;
     Ok(id)
 }
 
@@ -174,6 +177,7 @@ async fn folder_names_are_unique_per_parent_among_active_folders() {
     actor(pool, "b").await;
     let root = folder(pool, "a", None, "Dự án").await.expect("root folder");
     violates(folder(pool, "a", None, "Dự án").await, UNIQUE);
+    violates(folder(pool, "a", None, "DỰ ÁN").await, UNIQUE);
     folder(pool, "b", None, "Dự án")
         .await
         .expect("another owner may reuse the name");
@@ -338,6 +342,7 @@ async fn audit_events_are_written() {
         actor_id: Some("a"),
         tenant_id: None,
         document_id: None,
+        folder_id: None,
         action: "me.read",
         outcome: Outcome::Success,
         trace_id: "req-1",
