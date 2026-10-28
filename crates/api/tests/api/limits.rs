@@ -92,6 +92,29 @@ async fn trusted_proxy_address_keys_the_ip_limit() {
 }
 
 #[tokio::test]
+async fn forwarded_for_from_a_peer_that_is_not_the_proxy_is_ignored() {
+    let Some(app) = TestApp::spawn_with(|s| {
+        s.api.ip_rate = RateConfig {
+            burst: 1,
+            per_second: 0.01,
+        };
+        s.api.trust_forwarded_for = true;
+        // The test client connects from 127.0.0.1, which is then not the proxy.
+        s.api.trusted_proxies = "10.0.0.0/8".parse().expect("proxies");
+    })
+    .await
+    else {
+        return;
+    };
+    assert_eq!(health_from(&app, "203.0.113.1").await, 200);
+    assert_eq!(
+        health_from(&app, "203.0.113.2").await,
+        429,
+        "a forged header does not buy a fresh bucket"
+    );
+}
+
+#[tokio::test]
 async fn forwarded_for_is_ignored_unless_trusted() {
     let Some(app) = TestApp::spawn_with(|s| {
         s.api.ip_rate = RateConfig {

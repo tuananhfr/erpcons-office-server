@@ -16,6 +16,7 @@ mod requests;
 mod routes;
 mod state;
 mod trace;
+mod trusted_proxies;
 
 use axum::{
     Router,
@@ -31,6 +32,7 @@ pub use config::{ApiConfig, BODY_OVERHEAD_BYTES, RateConfig};
 pub use error::{ApiError, ErrorCode};
 pub use request_id::RequestId;
 pub use state::AppState;
+pub use trusted_proxies::{InvalidIpNet, IpNet, TrustedProxies};
 
 /// The whole HTTP surface. Layers run outermost first: request id, tracing, per-IP limit, body limit.
 pub fn router(state: AppState) -> Router {

@@ -37,6 +37,7 @@ site's own origin (`office.erpcons.vn`, Apache reverse proxy to `127.0.0.1:8710`
 | `ERPCONS_RATE_IP_BURST` / `ERPCONS_RATE_IP_PER_SEC` | `300` / `30` | Per client address |
 | `ERPCONS_RATE_ACTOR_BURST` / `ERPCONS_RATE_ACTOR_PER_SEC` | `120` / `10` | Per actor |
 | `ERPCONS_TRUST_FORWARDED_FOR` | `true` | Client address from the last `X-Forwarded-For` entry (Apache) |
+| `ERPCONS_TRUSTED_PROXIES` | `127.0.0.0/8,::1` (compose: the private ranges) | Only peers in these ranges may set `X-Forwarded-For`; others are keyed by their own address |
 | `ERPCONS_PURGE_INTERVAL_SECS` / `ERPCONS_ORPHAN_INTERVAL_SECS` | `3600` / `3600` | Job intervals; `0` turns a job off |
 | `ERPCONS_TRASH_RETENTION_DAYS` | `30` | Trashed items stay restorable this long, then are purged |
 | `ERPCONS_ORPHAN_MIN_AGE_SECS` | `3600` (at least `60`) | Stored bytes with no row are deleted once this old |

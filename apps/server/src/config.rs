@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
 
-use office_api::{ApiConfig, RateConfig};
+use office_api::{ApiConfig, RateConfig, TrustedProxies};
 use office_db::PoolConfig;
 use office_documents::{
     QuotaConfig,
@@ -90,6 +90,7 @@ impl ServerConfig {
             )?,
             // On by default: the server is reachable only through the local Apache proxy (plan §8).
             trust_forwarded_for: vars.parsed("ERPCONS_TRUST_FORWARDED_FOR", true)?,
+            trusted_proxies: vars.parsed("ERPCONS_TRUSTED_PROXIES", TrustedProxies::loopback())?,
         };
 
         let jobs = vars.jobs()?;
@@ -202,6 +203,7 @@ mod tests {
         assert_eq!(c.api.quota, QuotaConfig::default());
         assert_eq!(c.api.max_body_bytes, 101 * 1024 * 1024);
         assert!(c.api.trust_forwarded_for);
+        assert_eq!(c.api.trusted_proxies, TrustedProxies::loopback());
         assert_eq!(c.identity.base_url, "https://id.pi.example");
         assert_eq!(c.data_dir, PathBuf::from("/data"));
         assert_eq!(c.jobs.purge_every, Some(Duration::from_secs(3600)));
@@ -220,6 +222,7 @@ mod tests {
             ("ERPCONS_RATE_ACTOR_BURST", "5"),
             ("ERPCONS_RATE_ACTOR_PER_SEC", "0.5"),
             ("ERPCONS_TRUST_FORWARDED_FOR", "false"),
+            ("ERPCONS_TRUSTED_PROXIES", "172.16.0.0/12, 10.0.0.0/8"),
             ("ERPCONS_PI_TIMEOUT_MS", "1500"),
             ("ERPCONS_PURGE_INTERVAL_SECS", "600"),
             ("ERPCONS_ORPHAN_INTERVAL_SECS", "0"),
@@ -240,6 +243,16 @@ mod tests {
             }
         );
         assert!(!c.api.trust_forwarded_for);
+        assert!(
+            c.api
+                .trusted_proxies
+                .contains("172.18.0.1".parse().expect("ip"))
+        );
+        assert!(
+            !c.api
+                .trusted_proxies
+                .contains("127.0.0.1".parse().expect("ip"))
+        );
         assert_eq!(c.identity.timeout, Duration::from_millis(1500));
         assert_eq!(c.jobs.purge_every, Some(Duration::from_secs(600)));
         assert_eq!(c.jobs.orphans_every, None, "0 turns the sweep off");
@@ -272,6 +285,7 @@ mod tests {
             ("ERPCONS_TRASH_RETENTION_DAYS", "0"),
             ("ERPCONS_ORPHAN_MIN_AGE_SECS", "59"),
             ("ERPCONS_PURGE_INTERVAL_SECS", "-1"),
+            ("ERPCONS_TRUSTED_PROXIES", "10.0.0.0/33"),
         ] {
             assert_eq!(
                 load(&[bad]).err(),

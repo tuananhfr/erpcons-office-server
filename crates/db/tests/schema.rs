@@ -140,6 +140,23 @@ async fn migration_seeds_the_filesystem_location() {
 }
 
 #[tokio::test]
+async fn a_schema_migrated_by_a_newer_release_still_starts() {
+    let Some(db) = TestDb::create().await else {
+        return;
+    };
+    sqlx::query(
+        "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time)
+         VALUES (99991231000000, 'from a newer release', true, decode('00', 'hex'), 0)",
+    )
+    .execute(db.pool())
+    .await
+    .expect("record a migration this build does not know");
+    office_db::migrate(db.pool())
+        .await
+        .expect("a rollback to this build must not refuse the newer schema");
+}
+
+#[tokio::test]
 async fn upsert_seen_creates_once_then_updates() {
     let Some(db) = TestDb::create().await else {
         return;

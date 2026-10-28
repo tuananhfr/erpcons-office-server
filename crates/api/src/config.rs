@@ -1,5 +1,7 @@
 use office_documents::QuotaConfig;
 
+use crate::TrustedProxies;
+
 /// Token bucket: up to `burst` requests at once, refilled at `per_second`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RateConfig {
@@ -15,8 +17,9 @@ pub struct ApiConfig {
     pub ip_rate: RateConfig,
     pub actor_rate: RateConfig,
     /// Take the client address from the last `X-Forwarded-For` entry, which the reverse proxy
-    /// writes. Only safe when nothing but that proxy can reach the server.
+    /// writes, but only on connections from `trusted_proxies`.
     pub trust_forwarded_for: bool,
+    pub trusted_proxies: TrustedProxies,
 }
 
 /// Room above the per-file limit for multipart framing and the other form fields.
@@ -38,6 +41,7 @@ impl Default for ApiConfig {
                 per_second: 10.0,
             },
             trust_forwarded_for: false,
+            trusted_proxies: TrustedProxies::loopback(),
         }
     }
 }

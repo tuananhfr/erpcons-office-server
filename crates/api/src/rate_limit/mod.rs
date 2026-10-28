@@ -18,7 +18,7 @@ pub(crate) async fn per_ip(
     request: Request,
     next: Next,
 ) -> Response {
-    let ip = client_ip(&request, state.config.trust_forwarded_for);
+    let ip = client_ip(&request, &state.config);
     match state.ip_limiter.check(ip, Instant::now()) {
         Ok(()) => next.run(request).await,
         Err(retry_after) => ApiError::rate_limited(retry_after).into_response(),

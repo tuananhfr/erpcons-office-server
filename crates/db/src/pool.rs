@@ -47,7 +47,11 @@ pub fn connect_lazy(config: &PoolConfig) -> Result<PgPool, sqlx::Error> {
 
 /// Applies the embedded migrations that are not applied yet.
 pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
-    sqlx::migrate!("./migrations").run(pool).await
+    let mut migrator = sqlx::migrate!("./migrations");
+    // A rollback starts the previous release on a schema that already has the newer, add-only
+    // migrations (plan §8); refusing them would make the rollback fail to start.
+    migrator.set_ignore_missing(true);
+    migrator.run(pool).await
 }
 
 pub async fn ping(pool: &PgPool) -> Result<(), sqlx::Error> {

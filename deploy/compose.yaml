@@ -33,6 +33,9 @@ services:
       ERPCONS_QUOTA_BYTES: ${ERPCONS_QUOTA_BYTES:-1073741824}
       ERPCONS_MAX_FILE_BYTES: ${ERPCONS_MAX_FILE_BYTES:-104857600}
       ERPCONS_TRUST_FORWARDED_FOR: ${ERPCONS_TRUST_FORWARDED_FOR:-true}
+      # Apache reaches the container through Docker's port forwarding, so its peer address is the
+      # network gateway (a private address), not 127.0.0.1. The port is published on loopback only.
+      ERPCONS_TRUSTED_PROXIES: ${ERPCONS_TRUSTED_PROXIES:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
       # Background jobs (seconds; 0 turns a job off). Trash is restorable for the retention, then purged.
       ERPCONS_PURGE_INTERVAL_SECS: ${ERPCONS_PURGE_INTERVAL_SECS:-3600}
       ERPCONS_ORPHAN_INTERVAL_SECS: ${ERPCONS_ORPHAN_INTERVAL_SECS:-3600}
