@@ -17,7 +17,7 @@ pub struct ApiConfig {
     pub max_body_bytes: u64,
     pub ip_rate: RateConfig,
     pub actor_rate: RateConfig,
-    /// Per client address, the token checks that must ask PI (cache misses).
+    /// Per client address, the token checks that need a signature check (not cached, well-formed).
     pub verify_rate: RateConfig,
     /// Uploads and saves one actor may stream at once.
     pub max_concurrent_uploads: usize,

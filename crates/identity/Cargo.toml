@@ -7,26 +7,26 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
-# Signs a user in on an in-process pi-mock (`testing::access_token`) or stubs `/v1/me`
-# (`testing::stub_me`); enabled only by dev-dependencies.
-testing = ["dep:pi-mock", "dep:base64", "tokio/io-util", "tokio/net", "tokio/rt", "reqwest/form", "reqwest/query"]
+# An in-process PI stand-in that signs access tokens and serves its JWKS and userinfo
+# (`testing::FakePi`); enabled only by dev-dependencies.
+testing = ["tokio/io-util", "tokio/net", "tokio/time"]
 
 [dependencies]
 async-trait.workspace = true
+base64.workspace = true
 reqwest.workspace = true
+ring.workspace = true
 rustls.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tracing.workspace = true
-base64 = { workspace = true, optional = true }
-pi-mock = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "rt"] }
 
 [dev-dependencies]
 office-identity = { path = ".", features = ["testing"] }
-pi-mock.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]

@@ -17,6 +17,9 @@ is `docs/openapi.yaml`. The approved plan is `erpcons-workspace/tmp/briefs/offic
   Spans carry method, route template and request id only. `privacy.rs` checks this at TRACE.
 - **Migrations are add-only**: never edit or delete a migration once merged; add a new file in `crates/db/migrations/`.
   Use runtime queries (`sqlx::query*`), not the compile-time macros.
+- **Auth is local**: `JwtVerifier` checks PI's EdDSA access tokens against PI's JWKS (`alg`, `typ`, signature, `iss`,
+  `exp`/`nbf`/`iat`, `aud`, `azp` allow list, `sub`); never relax a check to make a token pass. `actor_id` = PI `sub`.
+  A request never fails because PI's userinfo (display name) is down.
 - **404, never 403**: anything the caller may not see answers `NOT_FOUND`. Every access decision goes through
   `office_documents::authorize`.
 - **Durable write order** (plan §4): temp file, fsync, verify sha256, rename, DB transaction (version +

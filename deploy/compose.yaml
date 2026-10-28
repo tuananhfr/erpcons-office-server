@@ -28,7 +28,10 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://erpcons_office:${POSTGRES_PASSWORD}@postgres:5432/erpcons_office
-      PI_BASE_URL: ${PI_BASE_URL:?set PI_BASE_URL in .env}
+      PI_ISSUER: ${PI_ISSUER:?set PI_ISSUER in .env}
+      PI_AUDIENCES: ${PI_AUDIENCES:-pi-platform}
+      PI_ALLOWED_CLIENTS: ${PI_ALLOWED_CLIENTS:-erpcons-office-web}
+      ERPCONS_PI_JWKS_TTL_SECS: ${ERPCONS_PI_JWKS_TTL_SECS:-300}
       ERPCONS_DB_MAX_CONNECTIONS: ${ERPCONS_DB_MAX_CONNECTIONS:-10}
       ERPCONS_QUOTA_BYTES: ${ERPCONS_QUOTA_BYTES:-1073741824}
       ERPCONS_MAX_FILE_BYTES: ${ERPCONS_MAX_FILE_BYTES:-104857600}

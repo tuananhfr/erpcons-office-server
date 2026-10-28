@@ -29,7 +29,6 @@ uuid.workspace = true
 office-db = { workspace = true, features = ["testing"] }
 office-documents = { workspace = true, features = ["testing"] }
 office-identity = { workspace = true, features = ["testing"] }
-pi-mock.workspace = true
 reqwest = { workspace = true, features = ["json", "stream"] }
 sqlx.workspace = true
 tempfile.workspace = true

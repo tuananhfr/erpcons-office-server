@@ -18,7 +18,7 @@ site's own origin (`office.erpcons.vn`, Apache reverse proxy to `127.0.0.1:8710`
 | `apps/server` | Binary: configuration from the environment, start-up (migrations), background jobs, graceful shutdown |
 | `crates/api` | axum router and thin handlers, `Error` body (also for framework rejections), request id, bearer auth (sampled denial audit), rate limits (per address with IPv6 by /64, per actor, token checks, concurrent uploads), body limits (64 KiB JSON), `Idempotency-Key`, tracing |
 | `crates/documents` | Document service: `authorize` (deny by default, owner only), folders and documents, durable save (bytes of a failed request are removed at once), quota, intake checks (signature, ZIP bomb), purge on request, purge, orphan and audit retention jobs, blank templates in `templates/` |
-| `crates/identity` | `IdentityVerifier`; `MeEndpointVerifier` asks PI `GET /v1/me` once per token hash at a time (single flight) and caches 60 s |
+| `crates/identity` | `IdentityVerifier`; `JwtVerifier` checks PI ID access tokens locally (EdDSA JWT: signature against PI's JWKS, `alg`, `typ`, `iss`, `exp`/`nbf`/`iat`, `aud`, `azp`, `sub`), caches verdicts 60 s (never past `exp`) and asks PI's `/id/userinfo` for the display name once per actor and hour; `testing::FakePi` stands in for PI in tests |
 | `crates/storage` | `StorageAdapter`; `FsStorage` stores objects by sha256 (temp file, fsync, verify, rename) |
 | `crates/db` | sqlx Postgres pool, migrations in `crates/db/migrations/` (run at start-up), queries |
 | `deploy/` | `compose.yaml` (Postgres 17 + server) and `.env.example` |
@@ -29,15 +29,18 @@ site's own origin (`office.erpcons.vn`, Apache reverse proxy to `127.0.0.1:8710`
 |---|---|---|
 | `DATABASE_URL` | required | Postgres URL |
 | `ERPCONS_DATA_DIR` | required (`/data` in the image) | Object store root |
-| `PI_BASE_URL` | required | PI Platform API base, without `/v1` |
+| `PI_ISSUER` | required | PI ID issuer, exactly as the tokens' `iss` (PI's `pi_id_issuer`); keys come from `{PI_ISSUER}/id/jwks.json`, names from `{PI_ISSUER}/id/userinfo` |
+| `PI_AUDIENCES` | `pi-platform` | Comma-separated; a token's `aud` must name one |
+| `PI_ALLOWED_CLIENTS` | `erpcons-office-web` | Comma-separated; a token's `azp` must be one (add `erpcons-office-desktop` when the desktop apps sync) |
 | `ERPCONS_BIND` | `127.0.0.1:8710` (`0.0.0.0:8710` in the image) | Listen address |
 | `ERPCONS_DB_MAX_CONNECTIONS` / `ERPCONS_DB_ACQUIRE_TIMEOUT_SECS` | `10` / `5` | Pool |
-| `ERPCONS_PI_TIMEOUT_MS` | `5000` | Timeout of the `/v1/me` call |
+| `ERPCONS_PI_TIMEOUT_MS` | `5000` | Timeout of a JWKS fetch (a userinfo call waits at most 2 s) |
+| `ERPCONS_PI_JWKS_TTL_SECS` | `300` | Age after which PI's keys are refreshed in the background; cached keys stay in use while PI is down, an unknown `kid` refetches at most every 10 s |
 | `ERPCONS_QUOTA_BYTES` / `ERPCONS_MAX_FILE_BYTES` | 1 GiB / 100 MiB | Per actor / per file |
 | `ERPCONS_MAX_BODY_BYTES` | per-file limit + 1 MiB | Body limit of uploads and saves; JSON bodies stop at 64 KiB (or this, if smaller) |
 | `ERPCONS_RATE_IP_BURST` / `ERPCONS_RATE_IP_PER_SEC` | `300` / `30` | Per client address |
 | `ERPCONS_RATE_ACTOR_BURST` / `ERPCONS_RATE_ACTOR_PER_SEC` | `120` / `10` | Per actor |
-| `ERPCONS_RATE_VERIFY_BURST` / `ERPCONS_RATE_VERIFY_PER_SEC` | `60` / `5` | Per client address, token checks that must ask PI (cache misses) |
+| `ERPCONS_RATE_VERIFY_BURST` / `ERPCONS_RATE_VERIFY_PER_SEC` | `60` / `5` | Per client address, token checks that need a key and a signature check (not cached, well-formed) |
 | `ERPCONS_MAX_CONCURRENT_UPLOADS` | `3` (at least `1`) | Uploads and saves one actor may stream at once; more answer 429 |
 | `ERPCONS_TRUST_FORWARDED_FOR` | `true` | Client address from the last `X-Forwarded-For` entry (Apache) |
 | `ERPCONS_TRUSTED_PROXIES` | `127.0.0.0/8,::1` (compose: the private ranges) | Only peers in these ranges may set `X-Forwarded-For`; others are keyed by their own address |
@@ -58,8 +61,8 @@ bash scripts/test.sh -p office-api   # extra arguments go to cargo test
 
 The script starts (or reuses) the container `erpcons-office-pg-test` (`postgres:17`, `127.0.0.1:55432`) and sets
 `TEST_DATABASE_URL`. Every database test creates its own database and drops it, so tests run in parallel. Without
-`TEST_DATABASE_URL` those tests print `skipped` and pass. PI is an in-process `pi_mock::Server` (`erpcons-account`,
-tag `v0.1.1`).
+`TEST_DATABASE_URL` those tests print `skipped` and pass. PI is `office_identity::testing::FakePi`, an in-process
+stand-in that signs tokens with a fresh Ed25519 key and serves `/id/jwks.json` and `/id/userinfo` as PI's code does.
 
 Licences and advisories: `cargo deny check` (permissive licences only, as in the forks).
 

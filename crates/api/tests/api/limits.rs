@@ -2,8 +2,6 @@ use std::time::Duration;
 
 use office_api::RateConfig;
 use office_documents::FailPoint;
-use office_identity::testing::access_token_as;
-use pi_mock::User;
 use reqwest::Method;
 use serde_json::json;
 
@@ -36,16 +34,7 @@ async fn per_actor_limit_answers_429_with_retry_after() {
     assert!(retry_after >= 1);
     expect_error(response, 429, "RATE_LIMITED", true).await;
 
-    app.pi.update_scenario(|s| {
-        s.users.push(User {
-            user_id: "usr_mock_binh".into(),
-            display_name: "Trần Thị Bình".into(),
-            email: None,
-            suspended: false,
-            memberships: Vec::new(),
-        });
-    });
-    let other = access_token_as(&app.pi, "usr_mock_binh").await;
+    let other = app.token_of("usr_mock_binh", "Trần Thị Bình").await;
     assert_eq!(
         app.get_as("/api/v1/me", &other).await.status(),
         200,

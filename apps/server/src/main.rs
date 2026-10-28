@@ -7,7 +7,7 @@ mod telemetry;
 
 use std::{error::Error, net::SocketAddr, process::ExitCode, sync::Arc};
 
-use office_identity::MeEndpointVerifier;
+use office_identity::JwtVerifier;
 use office_storage::FsStorage;
 use tokio::net::TcpListener;
 use tracing::{error, info};
@@ -31,7 +31,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let db = office_db::connect(&config.db).await?;
     office_db::migrate(&db).await?;
     let storage = Arc::new(FsStorage::open(&config.data_dir).await?);
-    let identity = Arc::new(MeEndpointVerifier::new(config.identity)?);
+    let identity = Arc::new(JwtVerifier::new(config.identity)?);
     let state = office_api::AppState::new(db.clone(), storage, identity, config.api);
     let jobs = Jobs::spawn(state.documents(), &config.jobs);
     let app = office_api::router(state).into_make_service_with_connect_info::<SocketAddr>();

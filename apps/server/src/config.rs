@@ -6,7 +6,7 @@ use office_documents::{
     QuotaConfig,
     jobs::{AuditRetentionConfig, OrphanConfig, PurgeConfig},
 };
-use office_identity::MeEndpointConfig;
+use office_identity::JwtVerifierConfig;
 
 use crate::jobs::JobsConfig;
 
@@ -24,7 +24,7 @@ pub(crate) struct ServerConfig {
     pub db: PoolConfig,
     pub data_dir: PathBuf,
     pub bind: SocketAddr,
-    pub identity: MeEndpointConfig,
+    pub identity: JwtVerifierConfig,
     pub api: ApiConfig,
     pub jobs: JobsConfig,
 }
@@ -52,17 +52,28 @@ impl ServerConfig {
             return Err(ConfigError::Invalid("ERPCONS_DB_ACQUIRE_TIMEOUT_SECS"));
         }
 
-        let pi_base_url = vars.required("PI_BASE_URL")?;
-        if !(pi_base_url.starts_with("https://") || pi_base_url.starts_with("http://")) {
-            return Err(ConfigError::Invalid("PI_BASE_URL"));
+        let issuer = vars.required("PI_ISSUER")?;
+        if !(issuer.starts_with("https://") || issuer.starts_with("http://")) {
+            return Err(ConfigError::Invalid("PI_ISSUER"));
         }
-        let mut identity = MeEndpointConfig::new(pi_base_url);
+        let mut identity = JwtVerifierConfig::new(issuer.trim());
+        if let Some(audiences) = vars.list("PI_AUDIENCES")? {
+            identity.audiences = audiences;
+        }
+        if let Some(clients) = vars.list("PI_ALLOWED_CLIENTS")? {
+            identity.allowed_clients = clients;
+        }
         let timeout_ms =
             vars.parsed("ERPCONS_PI_TIMEOUT_MS", identity.timeout.as_millis() as u64)?;
         if timeout_ms == 0 {
             return Err(ConfigError::Invalid("ERPCONS_PI_TIMEOUT_MS"));
         }
         identity.timeout = Duration::from_millis(timeout_ms);
+        let jwks_ttl = vars.parsed("ERPCONS_PI_JWKS_TTL_SECS", identity.jwks_ttl.as_secs())?;
+        if jwks_ttl == 0 {
+            return Err(ConfigError::Invalid("ERPCONS_PI_JWKS_TTL_SECS"));
+        }
+        identity.jwks_ttl = Duration::from_secs(jwks_ttl);
 
         let quota = QuotaConfig {
             limit_bytes: vars.parsed("ERPCONS_QUOTA_BYTES", defaults.quota.limit_bytes)?,
@@ -126,6 +137,23 @@ impl<F: Fn(&str) -> Option<String>> Vars<F> {
 
     fn required(&self, name: &'static str) -> Result<String, ConfigError> {
         self.get(name).ok_or(ConfigError::Missing(name))
+    }
+
+    /// A comma-separated list; set but empty is invalid.
+    fn list(&self, name: &'static str) -> Result<Option<Vec<String>>, ConfigError> {
+        let Some(value) = self.get(name) else {
+            return Ok(None);
+        };
+        let items: Vec<String> = value
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if items.is_empty() {
+            return Err(ConfigError::Invalid(name));
+        }
+        Ok(Some(items))
     }
 
     fn parsed<T: FromStr>(&self, name: &'static str, default: T) -> Result<T, ConfigError> {
@@ -213,7 +241,7 @@ mod tests {
     const REQUIRED: [(&str, &str); 3] = [
         ("DATABASE_URL", "postgres://u:secret@db/office"),
         ("ERPCONS_DATA_DIR", "/data"),
-        ("PI_BASE_URL", "https://id.pi.example"),
+        ("PI_ISSUER", "https://id.pi.example"),
     ];
 
     fn load(extra: &[(&str, &str)]) -> Result<ServerConfig, ConfigError> {
@@ -234,7 +262,11 @@ mod tests {
         assert_eq!(c.api.max_body_bytes, 101 * 1024 * 1024);
         assert!(c.api.trust_forwarded_for);
         assert_eq!(c.api.trusted_proxies, TrustedProxies::loopback());
-        assert_eq!(c.identity.base_url, "https://id.pi.example");
+        assert_eq!(c.identity.issuer, "https://id.pi.example");
+        assert_eq!(c.identity.audiences, ["pi-platform"]);
+        assert_eq!(c.identity.allowed_clients, ["erpcons-office-web"]);
+        assert_eq!(c.identity.jwks_ttl, Duration::from_secs(300));
+        assert_eq!(c.identity.timeout, Duration::from_secs(5));
         assert_eq!(c.data_dir, PathBuf::from("/data"));
         assert_eq!(c.jobs.purge_every, Some(Duration::from_secs(3600)));
         assert_eq!(c.jobs.purge.retention, Duration::from_secs(30 * 24 * 3600));
@@ -260,6 +292,12 @@ mod tests {
             ("ERPCONS_TRUST_FORWARDED_FOR", "false"),
             ("ERPCONS_TRUSTED_PROXIES", "172.16.0.0/12, 10.0.0.0/8"),
             ("ERPCONS_PI_TIMEOUT_MS", "1500"),
+            ("ERPCONS_PI_JWKS_TTL_SECS", "60"),
+            ("PI_AUDIENCES", "pi-platform,erpcons"),
+            (
+                "PI_ALLOWED_CLIENTS",
+                " erpcons-office-web , erpcons-office-desktop,",
+            ),
             ("ERPCONS_PURGE_INTERVAL_SECS", "600"),
             ("ERPCONS_ORPHAN_INTERVAL_SECS", "0"),
             ("ERPCONS_TRASH_RETENTION_DAYS", "7"),
@@ -294,6 +332,12 @@ mod tests {
                 .contains("127.0.0.1".parse().expect("ip"))
         );
         assert_eq!(c.identity.timeout, Duration::from_millis(1500));
+        assert_eq!(c.identity.jwks_ttl, Duration::from_secs(60));
+        assert_eq!(c.identity.audiences, ["pi-platform", "erpcons"]);
+        assert_eq!(
+            c.identity.allowed_clients,
+            ["erpcons-office-web", "erpcons-office-desktop"]
+        );
         assert_eq!(c.jobs.purge_every, Some(Duration::from_secs(600)));
         assert_eq!(c.jobs.orphans_every, None, "0 turns the sweep off");
         assert_eq!(c.jobs.purge.retention, Duration::from_secs(7 * 24 * 3600));
@@ -313,10 +357,10 @@ mod tests {
     fn missing_required_values_are_named() {
         let vars: HashMap<&str, &str> = REQUIRED
             .into_iter()
-            .filter(|(k, _)| *k != "PI_BASE_URL")
+            .filter(|(k, _)| *k != "PI_ISSUER")
             .collect();
         let err = ServerConfig::from_lookup(|name| vars.get(name).map(|v| (*v).to_owned()));
-        assert_eq!(err.err(), Some(ConfigError::Missing("PI_BASE_URL")));
+        assert_eq!(err.err(), Some(ConfigError::Missing("PI_ISSUER")));
     }
 
     #[test]
@@ -330,7 +374,11 @@ mod tests {
             ("ERPCONS_RATE_IP_PER_SEC", "0"),
             ("ERPCONS_RATE_IP_BURST", "0"),
             ("ERPCONS_MAX_BODY_BYTES", "10"),
-            ("PI_BASE_URL", "ftp://pi"),
+            ("PI_ISSUER", "ftp://pi"),
+            ("PI_ALLOWED_CLIENTS", " , "),
+            ("PI_AUDIENCES", ","),
+            ("ERPCONS_PI_JWKS_TTL_SECS", "0"),
+            ("ERPCONS_PI_TIMEOUT_MS", "0"),
             ("ERPCONS_TRASH_RETENTION_DAYS", "0"),
             ("ERPCONS_ORPHAN_MIN_AGE_SECS", "59"),
             ("ERPCONS_PURGE_INTERVAL_SECS", "-1"),

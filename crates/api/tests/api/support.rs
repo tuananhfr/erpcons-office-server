@@ -1,4 +1,4 @@
-//! A real server on a random port, a fresh database and an in-process pi-mock per test.
+//! A real server on a random port, a fresh database and an in-process PI stand-in per test.
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use office_api::{ApiConfig, AppState, RateConfig, router};
@@ -7,12 +7,8 @@ use office_documents::{
     Documents,
     intake::testing::{ZipEntry, zip},
 };
-use office_identity::{
-    MeEndpointConfig, MeEndpointVerifier,
-    testing::{access_token, access_token_as},
-};
+use office_identity::{JwtVerifier, JwtVerifierConfig, testing::FakePi};
 use office_storage::FsStorage;
-use pi_mock::{Scenario, Server, User};
 use reqwest::{Method, RequestBuilder, Response, header::AUTHORIZATION};
 use serde_json::Value;
 use tempfile::TempDir;
@@ -26,11 +22,11 @@ const UNLIMITED: RateConfig = RateConfig {
 
 pub struct Setup {
     pub api: ApiConfig,
-    pub identity: MeEndpointConfig,
+    pub identity: JwtVerifierConfig,
 }
 
 pub struct TestApp {
-    pub pi: Server,
+    pub pi: FakePi,
     pub data: TempDir,
     pub http: reqwest::Client,
     base: String,
@@ -61,7 +57,7 @@ impl TestApp {
     }
 
     async fn start(pool: PgPool, db: Option<TestDb>, tweak: impl FnOnce(&mut Setup)) -> Self {
-        let pi = Server::start(Scenario::default());
+        let pi = FakePi::start().await;
         let mut setup = Setup {
             api: ApiConfig {
                 ip_rate: UNLIMITED,
@@ -70,14 +66,14 @@ impl TestApp {
                 max_concurrent_uploads: 1000,
                 ..ApiConfig::default()
             },
-            identity: MeEndpointConfig::new(pi.base_url()),
+            identity: JwtVerifierConfig::new(pi.issuer()),
         };
         tweak(&mut setup);
         let data = tempfile::tempdir().expect("tempdir");
         let storage = FsStorage::open(data.path().join("store"))
             .await
             .expect("storage");
-        let identity = MeEndpointVerifier::new(setup.identity).expect("verifier");
+        let identity = JwtVerifier::new(setup.identity).expect("verifier");
         let state = AppState::new(
             pool.clone(),
             Arc::new(storage),
@@ -119,20 +115,13 @@ impl TestApp {
     }
 
     pub async fn token(&self) -> String {
-        access_token(&self.pi).await
+        self.pi.token()
     }
 
-    /// Token of another PI user, added to the scenario.
+    /// Token of another PI user, added to the stand-in.
     pub async fn token_of(&self, user_id: &str, display_name: &str) -> String {
-        let user = User {
-            user_id: user_id.into(),
-            display_name: display_name.into(),
-            email: None,
-            suspended: false,
-            memberships: Vec::new(),
-        };
-        self.pi.update_scenario(|s| s.users.push(user));
-        access_token_as(&self.pi, user_id).await
+        self.pi.add_user(user_id, display_name);
+        self.pi.token_for(user_id)
     }
 
     pub async fn get(&self, path: &str) -> Response {

@@ -25,8 +25,8 @@ impl FromRequestParts<AppState> for Authenticated {
         let verdict = match state.identity.cached(token) {
             Some(verdict) => verdict,
             None => {
-                // Every miss is a call to PI; random tokens must not turn this server into a
-                // flood against it.
+                // A miss costs a signature check and may fetch PI's keys or a display name; random
+                // tokens must not turn that into a load on this server or a flood against PI.
                 state
                     .verify_limiter
                     .check(client, Instant::now())

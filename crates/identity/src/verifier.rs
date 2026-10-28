@@ -17,7 +17,7 @@ pub enum VerifyError {
 pub trait IdentityVerifier: Send + Sync {
     async fn verify(&self, token: &str) -> Result<Actor, VerifyError>;
 
-    /// The verdict `verify` would give without asking the identity provider, if it has one; lets
-    /// the caller limit how often a client makes it ask.
+    /// The verdict `verify` would give without key lookups, signature work or asking the identity
+    /// provider, if it has one; lets the caller limit how often a client makes it do that work.
     fn cached(&self, token: &str) -> Option<Result<Actor, VerifyError>>;
 }

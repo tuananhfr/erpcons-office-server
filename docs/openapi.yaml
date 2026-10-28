@@ -7,9 +7,13 @@ info:
     trash, quota. Served on the site's origin under `/api/v1`, so browsers need no CORS.
 
     **Authentication.** Every operation except `/health` takes the user's PI ID access token as
-    `Authorization: Bearer`. The server resolves it to an actor (`actor_id` = PI `sub`) through its identity verifier;
-    until PI Platform offers resource-server verification, that is `GET /v1/me` on PI (see
-    `erpcons-office/docs/pi-integration/resource-server-auth.md`).
+    `Authorization: Bearer`. The server verifies it locally and resolves it to an actor (`actor_id` = PI `sub`): an
+    EdDSA JWT (`typ: JWT`) signed by a key in PI's JWKS, with the configured issuer, an unexpired `exp` (and `nbf`/`iat`
+    not in the future), an `aud` naming `pi-platform` and an `azp` among Office's clients (by default
+    `erpcons-office-web`). A token that fails any check answers 401 `UNAUTHENTICATED`; 503 `UNAVAILABLE` (retryable)
+    only when PI's keys cannot be fetched (none cached yet, or a new `kid` while PI is down). A locked PI account keeps
+    working until its access token expires (PI: 10 min). The display name comes from PI's userinfo and may be empty
+    when PI cannot be asked.
 
     **Authorization.** Phase 1: only the owner can see or change a document or folder. Anything the caller may not see
     answers 404, never 403, so existence is not revealed (§08).
@@ -23,9 +27,9 @@ info:
     per-file limit in `Me.quota.max_file_bytes`.
 
     **Rate limits.** Any authenticated operation may answer 429 `RATE_LIMITED` (retryable, with `Retry-After`): per
-    client address (an IPv6 client counts by its /64), per actor, per client address for token checks that must ask
-    PI (a token already verified and cached does not count), and per actor for uploads and saves streaming at the same
-    time (a few at once).
+    client address (an IPv6 client counts by its /64), per actor, per client address for token checks that need a
+    signature check (a token already verified and cached, or refused by its form alone, does not count), and per actor
+    for uploads and saves streaming at the same time (a few at once).
 
     **Idempotency.** The create and purge operations take `Idempotency-Key` (1–100 chars); a repeat with the same key
     and body within 24 h returns the first response, a repeat with a different body answers 422
@@ -468,7 +472,7 @@ components:
     piBearer:
       type: http
       scheme: bearer
-      description: PI ID access token (opaque to Office).
+      description: PI ID access token, an EdDSA-signed JWT verified against PI's JWKS.
   parameters:
     DocumentId:
       name: document_id
@@ -643,7 +647,7 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
     ServiceUnavailable:
-      description: '`UNAVAILABLE`: database or storage unreachable; `retryable` is true.'
+      description: '`UNAVAILABLE`: database, storage or (before its keys are cached) PI unreachable; `retryable` is true.'
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }

@@ -8,7 +8,8 @@ pub struct Actor {
     /// PI `sub`; immutable, the owner key of everything the actor stores.
     pub actor_id: String,
     pub display_name: String,
-    /// Until when this verification may be reused without asking PI again.
+    /// Until when this verification may be reused without checking the token again; never past
+    /// the token's `exp`.
     pub expires_at: OffsetDateTime,
 }
 

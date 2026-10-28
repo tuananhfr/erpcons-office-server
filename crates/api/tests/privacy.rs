@@ -11,9 +11,10 @@ mod support;
 use std::{
     io,
     sync::{Arc, Mutex, PoisonError},
+    time::Duration,
 };
 
-use pi_mock::Fault;
+use office_identity::testing::DEFAULT_NAME;
 use reqwest::Method;
 use serde_json::{Value, json};
 
@@ -58,7 +59,8 @@ impl io::Write for LogCapture {
 async fn tokens_and_names_stay_out_of_logs_and_audit() {
     let logs = LogCapture::default();
     logs.install_global();
-    let Some(app) = TestApp::spawn().await else {
+    let Some(app) = TestApp::spawn_with(|s| s.identity.jwks_min_refresh = Duration::ZERO).await
+    else {
         return;
     };
     let token = app.token().await;
@@ -69,12 +71,13 @@ async fn tokens_and_names_stay_out_of_logs_and_audit() {
     let ok_id = request_id(&ok);
     let canaries = touch_documents(&app, &token).await;
     assert_eq!(app.get_as("/api/v1/me", rejected).await.status(), 401);
-    app.pi
-        .add_fault(Fault::problem("GET", "/v1/me", 503, "unavailable"));
+    // A key PI rotated in while it is down cannot be fetched: the check is unavailable.
+    app.pi.rotate("2027-04", true);
+    app.pi.set_down(true);
     let fresh = app.token().await;
     assert_eq!(app.get_as("/api/v1/me", &fresh).await.status(), 503);
 
-    let mut secrets = vec![token.as_str(), fresh.as_str(), rejected, "Nguyễn Văn An"];
+    let mut secrets = vec![token.as_str(), fresh.as_str(), rejected, DEFAULT_NAME];
     secrets.extend(canaries);
     let text = logs.text();
     assert!(text.contains(&ok_id), "request spans are logged: {text}");

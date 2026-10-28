@@ -1,4 +1,4 @@
-//! `/api/v1` against a real Postgres (`TEST_DATABASE_URL`) and an in-process pi-mock.
+//! `/api/v1` against a real Postgres (`TEST_DATABASE_URL`) and an in-process PI stand-in.
 mod content;
 mod documents;
 mod errors;

@@ -1,6 +1,7 @@
 use sqlx::PgExecutor;
 
 /// Records that `actor_id` was seen now, creating it on first sight. Returns `true` when created.
+/// An empty `display_name` (PI could not be asked) keeps the stored one.
 pub async fn upsert_seen(
     db: impl PgExecutor<'_>,
     actor_id: &str,
@@ -10,7 +11,8 @@ pub async fn upsert_seen(
     sqlx::query_scalar(
         "INSERT INTO actors (id, display_name) VALUES ($1, $2)
          ON CONFLICT (id) DO UPDATE
-             SET display_name = EXCLUDED.display_name, last_seen_at = now()
+             SET display_name = COALESCE(NULLIF(EXCLUDED.display_name, ''), actors.display_name),
+                 last_seen_at = now()
          RETURNING (xmax = 0)",
     )
     .bind(actor_id)

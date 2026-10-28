@@ -182,6 +182,18 @@ async fn upsert_seen_creates_once_then_updates() {
             .expect("row");
     assert_eq!(name, "An Nguyễn");
     assert!(seen >= first);
+
+    actors::upsert_seen(pool, "usr_1", "")
+        .await
+        .expect("update");
+    let name: String = sqlx::query_scalar("SELECT display_name FROM actors WHERE id = 'usr_1'")
+        .fetch_one(pool)
+        .await
+        .expect("row");
+    assert_eq!(
+        name, "An Nguyễn",
+        "an unknown name keeps the last known one"
+    );
 }
 
 #[tokio::test]
