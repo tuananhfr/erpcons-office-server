@@ -438,3 +438,41 @@ async fn folder_events_are_audited_with_the_folder_id() {
         .await;
     assert_eq!(unlabelled, 0);
 }
+
+#[tokio::test]
+async fn a_folder_comes_with_its_ancestors_from_the_top() {
+    let Some(app) = TestApp::spawn().await else {
+        return;
+    };
+    let token = app.token().await;
+    let a = app.create_folder(&token, None, "A").await;
+    let b = app.create_folder(&token, Some(id(&a)), "B").await;
+    let c = app.create_folder(&token, Some(id(&b)), "C").await;
+    let get = |folder: &str| {
+        let (app, token) = (&app, &token);
+        let path = format!("/api/v1/folders/{folder}");
+        async move { app.get_as(&path, token).await }
+    };
+
+    let path = ok_json(get(id(&c)).await, 200).await;
+    assert_eq!(path["folder"], c);
+    let ancestors: Vec<&str> = path["ancestors"]
+        .as_array()
+        .expect("ancestors")
+        .iter()
+        .map(|f| f["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(ancestors, ["A", "B"]);
+    assert_eq!(path["ancestors"][0], a);
+    let top = ok_json(get(id(&a)).await, 200).await;
+    assert_eq!(top["ancestors"], json!([]), "the root is not listed");
+
+    expect_error(get("root").await, 422, "INVALID_REQUEST", false).await;
+    let random = uuid::Uuid::new_v4().to_string();
+    expect_error(get(&random).await, 404, "NOT_FOUND", false).await;
+    app.trash(&token, &format!("/api/v1/folders/{}", id(&b)))
+        .await;
+    for trashed in [id(&b), id(&c)] {
+        expect_error(get(trashed).await, 404, "NOT_FOUND", false).await;
+    }
+}

@@ -1,9 +1,9 @@
-//! The purge and orphan jobs on fixed intervals, beside the HTTP server.
+//! The purge, orphan and audit retention jobs on fixed intervals, beside the HTTP server.
 use std::{future::Future, sync::Arc, time::Duration};
 
 use office_documents::{
     Documents,
-    jobs::{OrphanConfig, PurgeConfig},
+    jobs::{AuditRetentionConfig, OrphanConfig, PurgeConfig},
 };
 use tokio::{
     task::JoinHandle,
@@ -11,12 +11,16 @@ use tokio::{
 };
 use tracing::{error, info};
 
-/// `None` interval: the job does not run.
+/// Old audit rows are few per run; hourly keeps each run small.
+const AUDIT_EVERY: Duration = Duration::from_secs(3600);
+
+/// `None` interval (or audit config): the job does not run.
 pub(crate) struct JobsConfig {
     pub purge_every: Option<Duration>,
     pub purge: PurgeConfig,
     pub orphans_every: Option<Duration>,
     pub orphans: OrphanConfig,
+    pub audit: Option<AuditRetentionConfig>,
 }
 
 /// Running jobs; stopped before the database pool closes.
@@ -56,6 +60,18 @@ impl Jobs {
                             "orphan sweep done"
                         ),
                         Err(e) => error!(error = %e, "orphan sweep failed"),
+                    }
+                }
+            }));
+        }
+        if let Some(audit) = config.audit {
+            let docs = docs.clone();
+            tasks.push(repeat(AUDIT_EVERY, move || {
+                let docs = docs.clone();
+                async move {
+                    match docs.expire_audit(&audit).await {
+                        Ok(deleted) => info!(deleted, "audit retention done"),
+                        Err(e) => error!(error = %e, "audit retention failed"),
                     }
                 }
             }));

@@ -11,7 +11,8 @@ use super::respond::{self, caller};
 use crate::{
     ApiError, AppState, Authenticated, RequestId,
     dto::{DocumentDto, VersionsDto},
-    extract::{ApiJson, ApiPath, ApiQuery},
+    extract::{ApiJson, ApiPath, ApiQuery, IdempotencyKey},
+    idempotency::{self, Stored},
     requests::{PageQuery, UpdateDocument},
 };
 
@@ -64,6 +65,23 @@ pub(crate) async fn restore(
         .restore_document(&caller(&actor, &rid), id)
         .await?;
     Ok(Json(DocumentDto::from(&doc)).into_response())
+}
+
+/// Deletes a trashed document for good.
+pub(crate) async fn purge(
+    State(state): State<AppState>,
+    Extension(rid): Extension<RequestId>,
+    Authenticated(actor): Authenticated,
+    ApiPath(id): ApiPath<Uuid>,
+    key: IdempotencyKey,
+) -> Result<Response, ApiError> {
+    let hash = idempotency::request_hash("document.purge", id);
+    let (docs, c) = (&state.docs, caller(&actor, &rid));
+    idempotency::run(&state, &actor, &key, &hash, move || async move {
+        docs.purge_document(&c, id).await?;
+        Ok(Stored::empty(StatusCode::NO_CONTENT))
+    })
+    .await
 }
 
 pub(crate) async fn versions(

@@ -6,7 +6,8 @@ site's own origin (`office.erpcons.vn`, Apache reverse proxy to `127.0.0.1:8710`
 - Contract: [`docs/openapi.yaml`](docs/openapi.yaml) (source of truth for paths, error body and codes).
 - Plan and decisions: `erpcons-workspace/tmp/briefs/office-online-v1/plan.md`, ADR `online-tier.md` in `erpcons-office`.
 - Status: milestone 2, the document API. Health and `/me` (milestone 1), folders, documents (upload, blank, content,
-  save with `If-Match`, versions), trash, plus the purge and orphan jobs.
+  save with `If-Match` and replay of a save whose answer was lost, versions), folder path, trash and purge on request,
+  plus the purge, orphan and audit retention jobs.
 - Known limit: `Idempotency-Key` stores the response after the create commits. If the server dies in between, the
   key's claim lapses after 60 s and a repeat creates a second item instead of replaying the first.
 
@@ -15,9 +16,9 @@ site's own origin (`office.erpcons.vn`, Apache reverse proxy to `127.0.0.1:8710`
 | Path | Role |
 |---|---|
 | `apps/server` | Binary: configuration from the environment, start-up (migrations), background jobs, graceful shutdown |
-| `crates/api` | axum router and thin handlers, `Error` body (also for framework rejections), request id, bearer auth, rate and body limits, `Idempotency-Key`, tracing |
-| `crates/documents` | Document service: `authorize` (deny by default, owner only), folders and documents, durable save, quota, intake checks (signature, ZIP bomb), purge and orphan jobs, blank templates in `templates/` |
-| `crates/identity` | `IdentityVerifier`; `MeEndpointVerifier` asks PI `GET /v1/me` and caches 60 s by token hash |
+| `crates/api` | axum router and thin handlers, `Error` body (also for framework rejections), request id, bearer auth (sampled denial audit), rate limits (per address with IPv6 by /64, per actor, token checks, concurrent uploads), body limits (64 KiB JSON), `Idempotency-Key`, tracing |
+| `crates/documents` | Document service: `authorize` (deny by default, owner only), folders and documents, durable save (bytes of a failed request are removed at once), quota, intake checks (signature, ZIP bomb), purge on request, purge, orphan and audit retention jobs, blank templates in `templates/` |
+| `crates/identity` | `IdentityVerifier`; `MeEndpointVerifier` asks PI `GET /v1/me` once per token hash at a time (single flight) and caches 60 s |
 | `crates/storage` | `StorageAdapter`; `FsStorage` stores objects by sha256 (temp file, fsync, verify, rename) |
 | `crates/db` | sqlx Postgres pool, migrations in `crates/db/migrations/` (run at start-up), queries |
 | `deploy/` | `compose.yaml` (Postgres 17 + server) and `.env.example` |
@@ -33,14 +34,17 @@ site's own origin (`office.erpcons.vn`, Apache reverse proxy to `127.0.0.1:8710`
 | `ERPCONS_DB_MAX_CONNECTIONS` / `ERPCONS_DB_ACQUIRE_TIMEOUT_SECS` | `10` / `5` | Pool |
 | `ERPCONS_PI_TIMEOUT_MS` | `5000` | Timeout of the `/v1/me` call |
 | `ERPCONS_QUOTA_BYTES` / `ERPCONS_MAX_FILE_BYTES` | 1 GiB / 100 MiB | Per actor / per file |
-| `ERPCONS_MAX_BODY_BYTES` | per-file limit + 1 MiB | Request body limit |
+| `ERPCONS_MAX_BODY_BYTES` | per-file limit + 1 MiB | Body limit of uploads and saves; JSON bodies stop at 64 KiB (or this, if smaller) |
 | `ERPCONS_RATE_IP_BURST` / `ERPCONS_RATE_IP_PER_SEC` | `300` / `30` | Per client address |
 | `ERPCONS_RATE_ACTOR_BURST` / `ERPCONS_RATE_ACTOR_PER_SEC` | `120` / `10` | Per actor |
+| `ERPCONS_RATE_VERIFY_BURST` / `ERPCONS_RATE_VERIFY_PER_SEC` | `60` / `5` | Per client address, token checks that must ask PI (cache misses) |
+| `ERPCONS_MAX_CONCURRENT_UPLOADS` | `3` (at least `1`) | Uploads and saves one actor may stream at once; more answer 429 |
 | `ERPCONS_TRUST_FORWARDED_FOR` | `true` | Client address from the last `X-Forwarded-For` entry (Apache) |
 | `ERPCONS_TRUSTED_PROXIES` | `127.0.0.0/8,::1` (compose: the private ranges) | Only peers in these ranges may set `X-Forwarded-For`; others are keyed by their own address |
 | `ERPCONS_PURGE_INTERVAL_SECS` / `ERPCONS_ORPHAN_INTERVAL_SECS` | `3600` / `3600` | Job intervals; `0` turns a job off |
 | `ERPCONS_TRASH_RETENTION_DAYS` | `30` | Trashed items stay restorable this long, then are purged |
-| `ERPCONS_ORPHAN_MIN_AGE_SECS` | `3600` (at least `60`) | Stored bytes with no row are deleted once this old |
+| `ERPCONS_ORPHAN_MIN_AGE_SECS` | `600` (at least `60`) | Stored bytes with no row are deleted once this old |
+| `ERPCONS_AUDIT_RETENTION_DAYS` | `180` | Audit rows older than this are deleted hourly; `0` keeps them forever |
 | `RUST_LOG` | `info,sqlx=warn` | Log filter |
 
 ## Tests

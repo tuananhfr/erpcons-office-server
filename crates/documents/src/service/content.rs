@@ -1,34 +1,22 @@
 //! Durable writes (plan §4): the bytes are stored first (temp file, fsync, sha256, rename), then
 //! one transaction records them; only its commit makes a version exist. Bytes stored by a request
-//! that fails later have no row and are removed by the orphan sweep.
-use std::io::Cursor;
-
+//! that fails later are discarded ([`Documents::discard`]); the orphan sweep removes what a crash
+//! leaves.
 use office_db::{
     PgConnection, documents, locks, objects, quota,
     versions::{self, NewVersion},
 };
-use office_storage::{ObjectKey, ObjectReader, PutOptions, Sha256Digest, StorageError};
+use office_storage::{ObjectKey, ObjectReader, StorageError};
 use tracing::error;
 use uuid::Uuid;
 
 use super::{
-    Caller, Documents,
+    Caller, Documents, Staged,
     audit::{self, Subject},
     documents::{active_document, owned_document},
     folders::active_folder,
 };
-use crate::{
-    Action, DocError, Document, FailPoint, Format, Name, intake::ValidatingReader, templates,
-};
-
-/// Bytes accepted and stored, not yet part of any document.
-#[derive(Clone, Debug)]
-pub struct Staged {
-    pub key: ObjectKey,
-    pub sha256: Sha256Digest,
-    pub size: u64,
-    pub format: Format,
-}
+use crate::{Action, DocError, Document, FailPoint, Format, Name, templates};
 
 pub struct CreateDocument {
     pub folder_id: Option<Uuid>,
@@ -47,53 +35,6 @@ pub struct Content {
 }
 
 impl Documents {
-    /// Streams an upload to storage, checking signature, ZIP structure and the per-file limit on
-    /// the way. Nothing is kept when a check fails.
-    pub async fn stage_upload(
-        &self,
-        c: &Caller<'_>,
-        format: Format,
-        source: ObjectReader,
-    ) -> Result<Staged, DocError> {
-        let result = self.stage(format, source).await;
-        self.audit_failure(c, "document.create", Subject::None, &result)
-            .await;
-        result
-    }
-
-    /// Stores the blank template of `format`.
-    pub async fn stage_blank(&self, c: &Caller<'_>, format: Format) -> Result<Staged, DocError> {
-        let result = self
-            .stage(format, Box::pin(Cursor::new(templates::blank(format))))
-            .await;
-        self.audit_failure(c, "document.create", Subject::None, &result)
-            .await;
-        result
-    }
-
-    async fn stage(&self, format: Format, source: ObjectReader) -> Result<Staged, DocError> {
-        let reader = ValidatingReader::new(source, format, self.zip_limits);
-        let options = PutOptions {
-            max_bytes: Some(self.quota.max_file_bytes),
-            ..PutOptions::default()
-        };
-        let put = self
-            .storage
-            .put(Box::pin(reader), options)
-            .await
-            .map_err(DocError::storage)?;
-        self.fail_points.pause(FailPoint::AfterPut).await;
-        if self.fail_points.fires(FailPoint::AfterPut) {
-            return Err(DocError::Unavailable);
-        }
-        Ok(Staged {
-            key: put.key,
-            sha256: put.sha256,
-            size: put.size,
-            format,
-        })
-    }
-
     /// Creates a document whose version 1 is `staged`.
     pub async fn create_document(
         &self,
@@ -166,17 +107,29 @@ impl Documents {
         source: ObjectReader,
     ) -> Result<Document, DocError> {
         let current = active_document(&self.db, c, id, Action::Write).await?;
-        // Refused before reading the body: a stale editor need not upload 100 MB to learn it.
         if !if_match.contains(&current.etag) {
-            return Err(DocError::VersionConflict {
-                latest_version: current.version,
-            });
+            return self.replay_or_conflict(c, current, if_match, source).await;
         }
+        self.check_room(c).await?;
         let format = Format::from_mime(&current.mime).ok_or(DocError::Unavailable)?;
         let staged = self.stage(format, source).await?;
+        let result = self.record_save(c, id, if_match, &staged).await;
+        if result.is_err() {
+            self.discard(&staged).await;
+        }
+        result
+    }
+
+    async fn record_save(
+        &self,
+        c: &Caller<'_>,
+        id: Uuid,
+        if_match: &[String],
+        staged: &Staged,
+    ) -> Result<Document, DocError> {
         let mut tx = self.begin().await?;
         self.touch_actor(&mut tx, c).await?;
-        let object_id = self.claim_object(&mut tx, c.owner(), &staged).await?;
+        let object_id = self.claim_object(&mut tx, c.owner(), staged).await?;
         // The row lock makes this check and the update below one step: of two saves on the same
         // base, the second waits here and then sees the first one's etag.
         let target = documents::lock_for_save(&mut tx, id)
@@ -198,7 +151,7 @@ impl Documents {
                 latest_version: target.version,
             });
         }
-        record_version(&mut tx, c, id, target.version + 1, object_id, &staged).await?;
+        record_version(&mut tx, c, id, target.version + 1, object_id, staged).await?;
         audit::success(&mut tx, c, "document.save", Subject::Document(id)).await?;
         self.commit(tx).await?;
         owned_document(&self.db, c, id, Action::Read)
@@ -294,10 +247,14 @@ async fn record_version(
     versions::insert(&mut *conn, &version)
         .await
         .map_err(DocError::db)?;
-    let etag = format!("\"{}\"", version_id.simple());
-    documents::set_current_version(conn, document_id, version_id, &etag)
+    documents::set_current_version(conn, document_id, version_id, &version_etag(version_id))
         .await
         .map_err(DocError::db)
+}
+
+/// A document's etag names its current version, so the etag of any version is known.
+pub(super) fn version_etag(version_id: Uuid) -> String {
+    format!("\"{}\"", version_id.simple())
 }
 
 fn size_i64(size: u64) -> Result<i64, DocError> {

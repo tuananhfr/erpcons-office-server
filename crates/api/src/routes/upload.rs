@@ -20,6 +20,7 @@ use crate::{
     ApiError, AppState, Authenticated, ErrorCode, RequestId,
     extract::{ApiJson, IdempotencyKey},
     idempotency,
+    rate_limit::upload_slot,
     requests::CreateBlank,
 };
 
@@ -57,8 +58,14 @@ pub(crate) async fn create(
         "multipart/form-data" => {
             let boundary =
                 multer::parse_boundary(&content_type).map_err(|_| ErrorCode::InvalidRequest)?;
+            let _slot = upload_slot(&state, &actor.actor_id)?;
             let upload = read_upload(&state, &c, request.into_body(), boundary).await?;
-            create_uploaded(&state, c, &key, upload).await
+            let staged = upload.staged.clone();
+            let result = create_uploaded(&state, c, &key, upload).await;
+            if result.is_err() {
+                state.docs.discard(&staged).await;
+            }
+            result
         }
         _ => Err(ErrorCode::InvalidRequest.into()),
     }
@@ -82,10 +89,15 @@ async fn create_blank(
             folder_id,
             title,
             file_name: None,
-            staged,
+            staged: staged.clone(),
         };
-        let doc = docs.create_document(&c, request).await?;
-        Ok(stored_document(StatusCode::CREATED, &doc))
+        match docs.create_document(&c, request).await {
+            Ok(doc) => Ok(stored_document(StatusCode::CREATED, &doc)),
+            Err(e) => {
+                docs.discard(&staged).await;
+                Err(e.into())
+            }
+        }
     })
     .await
 }
@@ -130,12 +142,30 @@ async fn create_uploaded(
 }
 
 /// Reads the form, streaming `file` to storage as it arrives. The format is the file name's
-/// extension, then checked against the content.
+/// extension, then checked against the content. Stored bytes are discarded when the rest of the
+/// form is refused.
 async fn read_upload(
     state: &AppState,
     c: &Caller<'_>,
     body: Body,
     boundary: String,
+) -> Result<Upload, ApiError> {
+    let mut staged = None;
+    let result = read_form(state, c, body, boundary, &mut staged).await;
+    if result.is_err()
+        && let Some(staged) = &staged
+    {
+        state.docs.discard(staged).await;
+    }
+    result
+}
+
+async fn read_form(
+    state: &AppState,
+    c: &Caller<'_>,
+    body: Body,
+    boundary: String,
+    staged: &mut Option<Staged>,
 ) -> Result<Upload, ApiError> {
     let limits = SizeLimit::new()
         .whole_stream(state.config.max_body_bytes)
@@ -145,7 +175,7 @@ async fn read_upload(
         .allowed_fields(vec![FILE, TITLE, FOLDER_ID])
         .size_limit(limits);
     let mut form = Multipart::with_constraints(body.into_data_stream(), boundary, constraints);
-    let (mut staged, mut file_name, mut title, mut folder_id) = (None, None, None, None);
+    let (mut file_name, mut title, mut folder_id) = (None, None, None);
     while let Some(field) = form.next_field().await.map_err(form_error)? {
         match field.name().unwrap_or_default() {
             FILE if staged.is_none() => {
@@ -155,7 +185,7 @@ async fn read_upload(
                     .and_then(Format::from_file_name)
                     .ok_or(ErrorCode::UnsupportedType)?;
                 let reader = StreamReader::new(field.map_err(body_error));
-                staged = Some(state.docs.stage_upload(c, format, Box::pin(reader)).await?);
+                *staged = Some(state.docs.stage_upload(c, format, Box::pin(reader)).await?);
             }
             TITLE if title.is_none() => title = Some(field.text().await.map_err(form_error)?),
             FOLDER_ID if folder_id.is_none() => {
@@ -167,7 +197,7 @@ async fn read_upload(
         }
     }
     Ok(Upload {
-        staged: staged.ok_or(ErrorCode::InvalidRequest)?,
+        staged: staged.clone().ok_or(ErrorCode::InvalidRequest)?,
         file_name,
         title,
         folder_id,

@@ -4,8 +4,10 @@ mod adapter;
 mod digest;
 mod error;
 mod fs;
+mod hash_stream;
 
 pub use adapter::{Capabilities, ObjectMeta, ObjectReader, PutOptions, PutOutcome, StorageAdapter};
 pub use digest::{ObjectKey, Sha256Digest};
 pub use error::StorageError;
 pub use fs::FsStorage;
+pub use hash_stream::digest_stream;

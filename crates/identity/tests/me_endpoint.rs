@@ -58,6 +58,38 @@ async fn valid_token_resolves_to_the_actor_and_is_cached() {
 }
 
 #[tokio::test]
+async fn concurrent_checks_of_one_token_ask_pi_once() {
+    let server = Server::start(Scenario::default());
+    let token = access_token(&server).await;
+    server.add_fault(Fault::delay("GET", "/v1/me", Duration::from_millis(300)));
+    let verifier = verifier(&server);
+    assert_eq!(verifier.cached(&token), None, "nothing cached yet");
+    let (a, b, c) = tokio::join!(
+        verifier.verify(&token),
+        verifier.verify(&token),
+        verifier.verify(&token)
+    );
+    assert_eq!(a.as_ref().map(|a| a.actor_id.as_str()), Ok(DEFAULT_USER));
+    assert_eq!((a.clone(), a.clone()), (b, c));
+    assert_eq!(me_calls(&server), 1, "one flight for the same token");
+    assert_eq!(verifier.cached(&token), Some(a));
+    let (x, y) = tokio::join!(verifier.verify("other-a"), verifier.verify("other-b"));
+    assert_eq!(
+        (x, y),
+        (
+            Err(VerifyError::Unauthenticated),
+            Err(VerifyError::Unauthenticated)
+        )
+    );
+    assert_eq!(me_calls(&server), 3, "different tokens do not share");
+    assert_eq!(
+        verifier.cached("two words"),
+        Some(Err(VerifyError::Unauthenticated)),
+        "a malformed token needs no call either"
+    );
+}
+
+#[tokio::test]
 async fn unknown_token_is_rejected_and_cached_only_briefly() {
     let server = Server::start(Scenario::default());
     let verifier = verifier_with(&server, |c| c.negative_ttl = Duration::from_millis(200));

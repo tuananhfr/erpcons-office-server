@@ -1,5 +1,5 @@
 //! Response bodies of the contract (`Folder`, `Document`, `Version` and the listings).
-use office_documents::{Document, Entries, Folder, Page, Version};
+use office_documents::{Document, Entries, Folder, FolderPath, Page, Version};
 use serde::Serialize;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -28,6 +28,22 @@ impl<'a> From<&'a Folder> for FolderDto<'a> {
             trashed_at: f.trashed_at,
             created_at: f.created_at,
             updated_at: f.updated_at,
+        }
+    }
+}
+
+/// `getFolder`: the folder and the folders above it, top level first.
+#[derive(Serialize)]
+pub(crate) struct FolderPathDto<'a> {
+    folder: FolderDto<'a>,
+    ancestors: Vec<FolderDto<'a>>,
+}
+
+impl<'a> From<&'a FolderPath> for FolderPathDto<'a> {
+    fn from(p: &'a FolderPath) -> Self {
+        Self {
+            folder: FolderDto::from(&p.folder),
+            ancestors: p.ancestors.iter().map(FolderDto::from).collect(),
         }
     }
 }

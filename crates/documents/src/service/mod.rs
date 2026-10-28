@@ -3,6 +3,9 @@ mod content;
 mod documents;
 mod folders;
 mod listing;
+mod purge;
+mod replay;
+mod staging;
 
 use std::sync::Arc;
 
@@ -11,9 +14,10 @@ use office_identity::Actor;
 use office_storage::StorageAdapter;
 
 pub(crate) use audit::{Subject, system as audit_system};
-pub use content::{Content, CreateDocument, Staged};
+pub use content::{Content, CreateDocument};
 pub use documents::DocumentPatch;
 pub use folders::FolderPatch;
+pub use staging::Staged;
 
 use crate::{DocError, FailPoints, QuotaConfig, intake::ZipLimits};
 

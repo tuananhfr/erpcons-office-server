@@ -92,7 +92,11 @@ impl Documents {
         Ok(report)
     }
 
-    async fn delete_dead_object(&self, object: &purge::DeadObject) -> Result<bool, DocError> {
+    /// Deletes `object`'s bytes when, under its lock, nothing live uses it.
+    pub(crate) async fn delete_dead_object(
+        &self,
+        object: &purge::DeadObject,
+    ) -> Result<bool, DocError> {
         let mut tx = self.begin().await?;
         locks::object(&mut tx, &object.sha256)
             .await

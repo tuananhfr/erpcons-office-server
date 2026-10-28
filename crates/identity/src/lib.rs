@@ -2,6 +2,7 @@
 mod actor;
 mod cache;
 mod me_endpoint;
+mod single_flight;
 #[cfg(feature = "testing")]
 pub mod testing;
 mod verifier;

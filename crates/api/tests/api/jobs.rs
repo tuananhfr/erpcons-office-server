@@ -1,10 +1,13 @@
 //! Durability fail points, the purge job and the orphan sweep, run directly.
 use std::time::Duration;
 
+use std::io::Cursor;
+
 use office_documents::{
     FailPoint,
-    jobs::{OrphanConfig, PurgeConfig},
+    jobs::{AuditRetentionConfig, OrphanConfig, PurgeConfig},
 };
+use office_storage::{FsStorage, PutOptions, StorageAdapter};
 use reqwest::Method;
 use serde_json::Value;
 
@@ -23,7 +26,7 @@ fn id(v: &Value) -> &str {
 }
 
 #[tokio::test]
-async fn a_save_failing_between_put_and_commit_leaves_no_version_and_its_bytes_are_swept() {
+async fn a_save_failing_between_put_and_commit_leaves_no_version_and_no_bytes() {
     let Some(app) = TestApp::spawn().await else {
         return;
     };
@@ -47,29 +50,11 @@ async fn a_save_failing_between_put_and_commit_leaves_no_version_and_its_bytes_a
         assert_eq!(app.count("SELECT count(*) FROM storage_objects").await, 1);
         assert_eq!(
             stored_objects(&app.store_dir()),
-            2,
-            "{point:?}: bytes are on disk"
-        );
-
-        let young = app
-            .documents()
-            .sweep_orphans(&OrphanConfig::default())
-            .await
-            .expect("sweep");
-        assert_eq!(
-            (young.unreferenced, young.deleted),
-            (1, 0),
-            "too young to sweep"
+            1,
+            "{point:?}: the failed request removed its bytes"
         );
         let swept = app.documents().sweep_orphans(&NOW).await.expect("sweep");
-        assert_eq!((swept.unreferenced, swept.deleted), (1, 1));
-        assert_eq!(
-            stored_objects(&app.store_dir()),
-            1,
-            "the live version stays"
-        );
-        let again = app.documents().sweep_orphans(&NOW).await.expect("sweep");
-        assert_eq!((again.unreferenced, again.deleted), (0, 0), "idempotent");
+        assert_eq!((swept.unreferenced, swept.deleted), (0, 0));
     }
     let meta = ok_json(
         app.get_as(&format!("/api/v1/documents/{}", id(&doc)), &token)
@@ -93,6 +78,41 @@ async fn a_save_failing_between_put_and_commit_leaves_no_version_and_its_bytes_a
 }
 
 #[tokio::test]
+async fn bytes_a_crash_left_without_a_row_are_swept_once_old_enough() {
+    let Some(app) = TestApp::spawn().await else {
+        return;
+    };
+    let token = app.token().await;
+    ok_json(app.upload(&token, "a.docx", &docx("kept"), &[]).await, 201).await;
+    // As a process that died between its put and its transaction would leave them.
+    let store = FsStorage::open(app.store_dir()).await.expect("store");
+    store
+        .put(Box::pin(Cursor::new(docx("orphan"))), PutOptions::default())
+        .await
+        .expect("put");
+    assert_eq!(stored_objects(&app.store_dir()), 2);
+    let young = app
+        .documents()
+        .sweep_orphans(&OrphanConfig::default())
+        .await
+        .expect("sweep");
+    assert_eq!(
+        (young.unreferenced, young.deleted),
+        (1, 0),
+        "too young to sweep"
+    );
+    let swept = app.documents().sweep_orphans(&NOW).await.expect("sweep");
+    assert_eq!((swept.unreferenced, swept.deleted), (1, 1));
+    assert_eq!(
+        stored_objects(&app.store_dir()),
+        1,
+        "the live version stays"
+    );
+    let again = app.documents().sweep_orphans(&NOW).await.expect("sweep");
+    assert_eq!((again.unreferenced, again.deleted), (0, 0), "idempotent");
+}
+
+#[tokio::test]
 async fn a_create_failing_before_commit_leaves_no_document() {
     let Some(app) = TestApp::spawn().await else {
         return;
@@ -103,9 +123,36 @@ async fn a_create_failing_before_commit_leaves_no_document() {
     expect_error(response, 503, "UNAVAILABLE", true).await;
     assert_eq!(app.count("SELECT count(*) FROM documents").await, 0);
     assert_eq!(app.count("SELECT count(*) FROM storage_objects").await, 0);
-    let swept = app.documents().sweep_orphans(&NOW).await.expect("sweep");
-    assert_eq!(swept.deleted, 1);
     assert_eq!(stored_objects(&app.store_dir()), 0);
+    let swept = app.documents().sweep_orphans(&NOW).await.expect("sweep");
+    assert_eq!(swept.deleted, 0, "nothing was left to sweep");
+}
+
+#[tokio::test]
+async fn audit_rows_past_retention_are_deleted() {
+    let Some(app) = TestApp::spawn().await else {
+        return;
+    };
+    let token = app.token().await;
+    for _ in 0..4 {
+        assert_eq!(app.get_as("/api/v1/me", &token).await.status(), 200);
+    }
+    sqlx::query(
+        "UPDATE audit_events SET at = now() - make_interval(days => 181)
+         WHERE id IN (SELECT id FROM audit_events ORDER BY id LIMIT 3)",
+    )
+    .execute(app.pool())
+    .await
+    .expect("age audit rows");
+    let config = AuditRetentionConfig {
+        batch: 2,
+        ..AuditRetentionConfig::default()
+    };
+    let deleted = app.documents().expire_audit(&config).await.expect("expire");
+    assert_eq!(deleted, 3, "in batches of 2");
+    assert_eq!(app.count("SELECT count(*) FROM audit_events").await, 1);
+    let again = app.documents().expire_audit(&config).await.expect("expire");
+    assert_eq!(again, 0, "idempotent");
 }
 
 async fn age_trash(app: &TestApp, days: i64) {

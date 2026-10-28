@@ -65,3 +65,20 @@ pub async fn insert(db: impl PgExecutor<'_>, event: &AuditEvent<'_>) -> Result<(
     .await
     .map(drop)
 }
+
+/// Deletes up to `batch` rows older than `retention_secs`; returns how many went.
+pub async fn delete_older_than(
+    db: impl PgExecutor<'_>,
+    retention_secs: i64,
+    batch: i64,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "DELETE FROM audit_events WHERE id IN (
+             SELECT id FROM audit_events WHERE at < now() - make_interval(secs => $1) LIMIT $2)",
+    )
+    .bind(retention_secs as f64)
+    .bind(batch)
+    .execute(db)
+    .await?;
+    Ok(result.rows_affected())
+}

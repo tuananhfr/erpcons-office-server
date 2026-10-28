@@ -260,3 +260,27 @@ pub async fn list_trash(
     .fetch_all(db)
     .await
 }
+
+/// The folders above `id`, from the top level down to its parent. The walk stops at a folder it
+/// has already seen, so it ends even if the data ever held a cycle.
+pub async fn ancestors(
+    db: impl PgExecutor<'_>,
+    owner_id: &str,
+    id: Uuid,
+) -> Result<Vec<FolderRow>, sqlx::Error> {
+    sqlx::query_as(&format!(
+        "WITH RECURSIVE up (up_id, depth, seen) AS (
+             SELECT parent_id, 1, ARRAY[id] FROM folders WHERE id = $1 AND owner_id = $2
+             UNION ALL
+             SELECT f.parent_id, up.depth + 1, up.seen || f.id
+             FROM folders f JOIN up ON f.id = up.up_id
+             WHERE f.owner_id = $2 AND NOT f.id = ANY(up.seen)
+         )
+         SELECT {COLUMNS} FROM folders JOIN up ON id = up_id
+         ORDER BY depth DESC"
+    ))
+    .bind(id)
+    .bind(owner_id)
+    .fetch_all(db)
+    .await
+}

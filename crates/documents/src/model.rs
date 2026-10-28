@@ -30,6 +30,12 @@ impl From<FolderRow> for Folder {
     }
 }
 
+/// A folder with the folders above it, from the top level down to its parent.
+pub struct FolderPath {
+    pub folder: Folder,
+    pub ancestors: Vec<Folder>,
+}
+
 /// A document with its current version. No `Debug`: the title is personal data.
 #[derive(Clone)]
 pub struct Document {

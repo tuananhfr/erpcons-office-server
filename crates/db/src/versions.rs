@@ -61,3 +61,28 @@ pub async fn list(
     .fetch_all(db)
     .await
 }
+
+/// The current version's content and author, and the id of the version before it.
+#[derive(Clone, sqlx::FromRow)]
+pub struct ReplayBase {
+    pub previous_id: Uuid,
+    pub sha256: String,
+    pub author_id: String,
+}
+
+/// `None` when the document has a single version (or none).
+pub async fn replay_base(
+    db: impl PgExecutor<'_>,
+    document_id: Uuid,
+) -> Result<Option<ReplayBase>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT prev.id AS previous_id, cur.sha256, cur.author_id
+         FROM documents d
+         JOIN document_versions cur ON cur.id = d.current_version_id
+         JOIN document_versions prev ON prev.document_id = d.id AND prev.seq = cur.seq - 1
+         WHERE d.id = $1",
+    )
+    .bind(document_id)
+    .fetch_optional(db)
+    .await
+}

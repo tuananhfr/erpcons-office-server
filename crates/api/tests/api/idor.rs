@@ -44,6 +44,10 @@ async fn another_actors_items_answer_404_like_a_random_id() {
     .expect("trash");
     let owner_etag =
         crate::documents::doc_etag(&app, &owner, doc["id"].as_str().expect("id")).await;
+    let trashed_folder = app.create_folder(&owner, None, "Thùng rác").await;
+    let trashed_folder_id = trashed_folder["id"].as_str().expect("id").to_owned();
+    app.trash(&owner, &format!("/api/v1/folders/{trashed_folder_id}"))
+        .await;
 
     let intruder = app.token_of("usr_mock_binh", "Trần Thị Bình").await;
     let own_folder = app.create_folder(&intruder, None, "Của tôi").await;
@@ -61,6 +65,10 @@ async fn another_actors_items_answer_404_like_a_random_id() {
         let t = intruder.as_str();
         let (form_type, form) = multipart(&[("folder_id", f)], Some(("x.docx", &file)));
         vec![
+            (
+                "get folder".into(),
+                app.request(Method::GET, &format!("/api/v1/folders/{f}"), t),
+            ),
             (
                 "children".into(),
                 app.request(Method::GET, &format!("/api/v1/folders/{f}/children"), t),
@@ -86,6 +94,11 @@ async fn another_actors_items_answer_404_like_a_random_id() {
             (
                 "restore folder".into(),
                 app.request(Method::POST, &format!("/api/v1/folders/{f}/restore"), t),
+            ),
+            (
+                "purge folder".into(),
+                app.request(Method::POST, &format!("/api/v1/folders/{f}/purge"), t)
+                    .header("idempotency-key", new_key()),
             ),
             (
                 "create folder in it".into(),
@@ -129,6 +142,11 @@ async fn another_actors_items_answer_404_like_a_random_id() {
                 app.request(Method::POST, &format!("/api/v1/documents/{d}/restore"), t),
             ),
             (
+                "purge document".into(),
+                app.request(Method::POST, &format!("/api/v1/documents/{d}/purge"), t)
+                    .header("idempotency-key", new_key()),
+            ),
+            (
                 "content".into(),
                 app.request(Method::GET, &format!("/api/v1/documents/{d}/content"), t),
             ),
@@ -158,13 +176,40 @@ async fn another_actors_items_answer_404_like_a_random_id() {
             Method::POST,
             format!("/api/v1/documents/{trashed_id}/restore"),
         ),
+        (
+            Method::POST,
+            format!("/api/v1/documents/{trashed_id}/purge"),
+        ),
+        (Method::GET, format!("/api/v1/folders/{trashed_folder_id}")),
+        (
+            Method::POST,
+            format!("/api/v1/folders/{trashed_folder_id}/purge"),
+        ),
     ] {
-        let (status, _) = answer(app.request(method, &path, &intruder)).await;
+        let request = app
+            .request(method, &path, &intruder)
+            .header("idempotency-key", new_key());
+        let (status, body) = answer(request).await;
         assert_eq!(status, 404, "{path}");
+        let random = path
+            .replace(&trashed_id, &random)
+            .replace(&trashed_folder_id, &random);
+        let method = if path.ends_with("purge") || path.ends_with("restore") {
+            Method::POST
+        } else {
+            Method::GET
+        };
+        let nothing = app
+            .request(method, &random, &intruder)
+            .header("idempotency-key", new_key());
+        assert_eq!(answer(nothing).await, (status, body), "{path}");
     }
 
     let trash = ok_json(app.get_as("/api/v1/trash", &intruder).await, 200).await;
     assert_eq!(trash["documents"], json!([]));
+    let owners_trash = ok_json(app.get_as("/api/v1/trash", &owner).await, 200).await;
+    assert_eq!(owners_trash["documents"][0]["id"], trashed["id"]);
+    assert_eq!(owners_trash["folders"][0]["id"], trashed_folder["id"]);
     let root = ok_json(
         app.get_as("/api/v1/folders/root/children", &intruder).await,
         200,

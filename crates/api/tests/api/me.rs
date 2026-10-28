@@ -7,6 +7,23 @@ use time::OffsetDateTime;
 
 use crate::support::{TestApp, expect_error, request_id};
 
+fn me_calls(app: &TestApp) -> usize {
+    app.pi
+        .requests()
+        .iter()
+        .filter(|r| r.path == "/v1/me")
+        .count()
+}
+
+async fn auth_rows(app: &TestApp) -> Vec<(String, String)> {
+    sqlx::query_as(
+        "SELECT action, result FROM audit_events WHERE action = 'auth.verify' ORDER BY at",
+    )
+    .fetch_all(app.pool())
+    .await
+    .expect("audit rows")
+}
+
 #[tokio::test]
 async fn valid_token_returns_the_actor_and_records_it() {
     let Some(app) = TestApp::spawn().await else {
@@ -177,4 +194,92 @@ async fn a_missing_or_unknown_account_status_is_503_and_creates_no_actor() {
             .expect("count");
         assert_eq!(actors, 0, "{body}");
     }
+}
+
+#[tokio::test]
+async fn malformed_authorization_writes_no_audit_row() {
+    let Some(app) = TestApp::spawn().await else {
+        return;
+    };
+    assert_eq!(app.get("/api/v1/me").await.status(), 401);
+    for header in [
+        "Basic dXNlcjpwYXNz",
+        "Bearer",
+        "Bearer two words",
+        "Bearer ===",
+    ] {
+        let response = app
+            .http
+            .get(app.url("/api/v1/me"))
+            .header(AUTHORIZATION, header)
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(response.status(), 401, "{header}");
+    }
+    let long = "a".repeat(4097);
+    assert_eq!(app.get_as("/api/v1/me", &long).await.status(), 401);
+    assert_eq!(app.count("SELECT count(*) FROM audit_events").await, 0);
+    assert_eq!(me_calls(&app), 0);
+}
+
+#[tokio::test]
+async fn refused_tokens_are_audited_once_per_client_and_minute() {
+    let Some(app) = TestApp::spawn().await else {
+        return;
+    };
+    for n in 0..5 {
+        let response = app.get_as("/api/v1/me", &format!("random-token-{n}")).await;
+        expect_error(response, 401, "UNAUTHENTICATED", false).await;
+    }
+    assert_eq!(me_calls(&app), 5, "each token was checked");
+    assert_eq!(
+        auth_rows(&app).await,
+        [("auth.verify".to_owned(), "denied".to_owned())]
+    );
+
+    let token = app.token().await;
+    app.pi
+        .add_fault(Fault::problem("GET", "/v1/me", 503, "unavailable"));
+    for _ in 0..3 {
+        let response = app.get_as("/api/v1/me", &token).await;
+        expect_error(response, 503, "UNAVAILABLE", true).await;
+    }
+    assert_eq!(
+        auth_rows(&app).await,
+        [
+            ("auth.verify".to_owned(), "denied".to_owned()),
+            ("auth.verify".to_owned(), "error".to_owned())
+        ],
+        "an outage is sampled on its own"
+    );
+}
+
+#[tokio::test]
+async fn token_checks_that_must_ask_pi_are_limited_per_client() {
+    let Some(app) = TestApp::spawn_with(|s| {
+        s.api.verify_rate = office_api::RateConfig {
+            burst: 2,
+            per_second: 0.01,
+        };
+    })
+    .await
+    else {
+        return;
+    };
+    let token = app.token().await;
+    assert_eq!(app.get_as("/api/v1/me", &token).await.status(), 200);
+    let refused = app.get_as("/api/v1/me", "random-token-1").await;
+    expect_error(refused, 401, "UNAUTHENTICATED", false).await;
+    let limited = app.get_as("/api/v1/me", "random-token-2").await;
+    assert!(limited.headers().contains_key("retry-after"));
+    expect_error(limited, 429, "RATE_LIMITED", true).await;
+    let again = app.get_as("/api/v1/me", "random-token-1").await;
+    expect_error(again, 401, "UNAUTHENTICATED", false).await;
+    assert_eq!(
+        app.get_as("/api/v1/me", &token).await.status(),
+        200,
+        "a cached token is not limited"
+    );
+    assert_eq!(me_calls(&app), 2, "the limited check never reached PI");
 }

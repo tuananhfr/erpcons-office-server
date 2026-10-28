@@ -10,7 +10,7 @@ use uuid::Uuid;
 use super::respond::caller;
 use crate::{
     ApiError, AppState, Authenticated, ErrorCode, RequestId,
-    dto::{EntriesDto, FolderDto},
+    dto::{EntriesDto, FolderDto, FolderPathDto},
     extract::{ApiJson, ApiPath, ApiQuery, IdempotencyKey},
     idempotency::{self, Stored},
     requests::{CreateFolder, PageQuery, UpdateFolder},
@@ -24,6 +24,16 @@ fn parent_of(path: &str) -> Result<Option<Uuid>, ApiError> {
     Uuid::parse_str(path)
         .map(Some)
         .map_err(|_| ErrorCode::InvalidRequest.into())
+}
+
+pub(crate) async fn get(
+    State(state): State<AppState>,
+    Extension(rid): Extension<RequestId>,
+    Authenticated(actor): Authenticated,
+    ApiPath(id): ApiPath<Uuid>,
+) -> Result<Response, ApiError> {
+    let path = state.docs.get_folder(&caller(&actor, &rid), id).await?;
+    Ok(Json(FolderPathDto::from(&path)).into_response())
 }
 
 pub(crate) async fn children(
@@ -98,4 +108,21 @@ pub(crate) async fn restore(
 ) -> Result<Response, ApiError> {
     let folder = state.docs.restore_folder(&caller(&actor, &rid), id).await?;
     Ok(Json(FolderDto::from(&folder)).into_response())
+}
+
+/// Deletes a trashed folder for good, with what was trashed together with it.
+pub(crate) async fn purge(
+    State(state): State<AppState>,
+    Extension(rid): Extension<RequestId>,
+    Authenticated(actor): Authenticated,
+    ApiPath(id): ApiPath<Uuid>,
+    key: IdempotencyKey,
+) -> Result<Response, ApiError> {
+    let hash = idempotency::request_hash("folder.purge", id);
+    let (docs, c) = (&state.docs, caller(&actor, &rid));
+    idempotency::run(&state, &actor, &key, &hash, move || async move {
+        docs.purge_folder(&c, id).await?;
+        Ok(Stored::empty(StatusCode::NO_CONTENT))
+    })
+    .await
 }

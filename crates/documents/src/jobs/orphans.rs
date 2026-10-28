@@ -19,7 +19,7 @@ pub struct OrphanConfig {
 impl Default for OrphanConfig {
     fn default() -> Self {
         Self {
-            min_age: Duration::from_secs(3600),
+            min_age: Duration::from_secs(600),
             page: 500,
         }
     }

@@ -20,7 +20,9 @@ is `docs/openapi.yaml`. The approved plan is `erpcons-workspace/tmp/briefs/offic
 - **404, never 403**: anything the caller may not see answers `NOT_FOUND`. Every access decision goes through
   `office_documents::authorize`.
 - **Durable write order** (plan §4): temp file, fsync, verify sha256, rename, DB transaction (version +
-  `current_version_id` + `etag`), commit, then 200. Never report success before the commit.
+  `current_version_id` + `etag`), commit, then 200. Never report success before the commit. A request that fails
+  after its put calls `Documents::discard` (deletes the bytes under `locks::object` unless deduplicated or referenced);
+  the orphan sweep only backs up crashes.
 - **Lock order** in a transaction: actor row, then `locks::tree` (owner), then `locks::object` (sha256), then document
   rows. A mutation writes its audit row inside its own transaction.
 - **Intake rules are shared with the site**: change `crates/documents/tests/intake_vectors.json` together with the

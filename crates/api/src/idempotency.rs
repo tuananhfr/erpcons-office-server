@@ -1,5 +1,5 @@
-//! `Idempotency-Key` on the create operations: the first response is kept 24 h and replayed for a
-//! repeat with the same body; a repeat with another body is refused.
+//! `Idempotency-Key` on the create and purge operations: the first response is kept 24 h and
+//! replayed for a repeat with the same body; a repeat with another body is refused.
 use axum::{
     Json,
     http::{HeaderValue, StatusCode, header::ETAG},
@@ -35,12 +35,25 @@ impl Stored {
             body: serde_json::to_value(body).unwrap_or(Value::Null),
         }
     }
+
+    /// A response without a body (`204`).
+    pub(crate) fn empty(status: StatusCode) -> Self {
+        Self {
+            status: status.as_u16(),
+            etag: None,
+            body: Value::Null,
+        }
+    }
 }
 
 impl IntoResponse for Stored {
     fn into_response(self) -> Response {
         let status = StatusCode::from_u16(self.status).unwrap_or(StatusCode::OK);
-        let mut response = (status, Json(self.body)).into_response();
+        let mut response = if status == StatusCode::NO_CONTENT {
+            status.into_response()
+        } else {
+            (status, Json(self.body)).into_response()
+        };
         if let Some(etag) = self.etag.and_then(|e| HeaderValue::from_str(&e).ok()) {
             response.headers_mut().insert(ETAG, etag);
         }

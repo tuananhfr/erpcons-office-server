@@ -17,7 +17,7 @@ pub use authorize::{Action, NotFound, Resource, authorize};
 pub use error::{BodyTooLarge, DocError};
 pub use fail_points::{FailPoint, FailPoints, Held};
 pub use format::{Format, Kind};
-pub use model::{Document, Entries, Folder, Page, PageRequest, Version};
+pub use model::{Document, Entries, Folder, FolderPath, Page, PageRequest, Version};
 pub use names::{InvalidName, Name};
 pub use quota::{QuotaConfig, QuotaError};
 pub use service::{Caller, Content, CreateDocument, DocumentPatch, Documents, FolderPatch, Staged};

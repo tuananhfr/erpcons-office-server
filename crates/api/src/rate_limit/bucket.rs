@@ -8,6 +8,9 @@ use std::{
 use crate::RateConfig;
 
 const MAX_KEYS: usize = 100_000;
+/// Share of the keys dropped when the table is full of busy buckets: evicting in batches keeps
+/// the cost of a full table spread over many requests.
+const EVICT_DIVISOR: usize = 10;
 /// `Retry-After` when the configured rate cannot refill at all.
 const NO_REFILL_RETRY_SECS: u64 = 60;
 
@@ -44,9 +47,11 @@ impl<K: Eq + Hash> KeyedLimiter<K> {
         if buckets.len() >= self.max_keys && !buckets.contains_key(&key) {
             // A bucket that refilled completely holds no state worth keeping.
             buckets.retain(|_, b| refilled(b, now, rate, burst) < burst);
-            // Still full: forget everything rather than let memory grow without bound.
+            // Still full: forget the least recently used, so a flood of new keys cannot reset
+            // the buckets of the clients that are being limited.
             if buckets.len() >= self.max_keys {
-                buckets.clear();
+                let count = (buckets.len() / EVICT_DIVISOR).max(1);
+                evict_oldest(&mut buckets, count);
             }
         }
         let bucket = buckets.entry(key).or_insert(Bucket {
@@ -72,6 +77,18 @@ impl<K: Eq + Hash> KeyedLimiter<K> {
             .unwrap_or_else(PoisonError::into_inner)
             .len()
     }
+}
+
+/// Removes the `count` buckets used longest ago (ties may take a few more).
+fn evict_oldest<K>(buckets: &mut HashMap<K, Bucket>, count: usize) {
+    let mut times: Vec<Instant> = buckets.values().map(|b| b.updated).collect();
+    if count == 0 || times.is_empty() {
+        return;
+    }
+    let nth = count.min(times.len()) - 1;
+    let (_, cutoff, _) = times.select_nth_unstable(nth);
+    let cutoff = *cutoff;
+    buckets.retain(|_, b| b.updated > cutoff);
 }
 
 fn refilled(bucket: &Bucket, now: Instant, rate: f64, burst: f64) -> f64 {
@@ -124,6 +141,27 @@ mod tests {
         assert_eq!(l.check("a", now), Ok(()));
         let later = now + Duration::from_secs(3600);
         assert_eq!(l.check("a", later), Err(NO_REFILL_RETRY_SECS));
+    }
+
+    #[test]
+    fn a_full_table_of_busy_buckets_evicts_the_least_recently_used() {
+        let l = KeyedLimiter::with_max_keys(
+            RateConfig {
+                burst: 1,
+                per_second: 0.001,
+            },
+            3,
+        );
+        let t = Instant::now();
+        l.check("a", t).expect("a");
+        l.check("b", t + Duration::from_secs(1)).expect("b");
+        l.check("c", t + Duration::from_secs(2)).expect("c");
+        l.check("d", t + Duration::from_secs(3)).expect("d");
+        assert_eq!(l.len(), 3);
+        let later = t + Duration::from_secs(4);
+        assert!(l.check("b", later).is_err(), "b keeps its empty bucket");
+        assert!(l.check("c", later).is_err(), "c too");
+        assert_eq!(l.check("a", later), Ok(()), "a, the oldest, was evicted");
     }
 
     #[test]

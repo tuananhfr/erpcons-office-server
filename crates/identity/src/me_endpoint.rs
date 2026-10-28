@@ -8,7 +8,8 @@ use tracing::warn;
 
 use crate::{
     Actor, IdentityVerifier, VerifyError,
-    cache::{VerdictCache, hash_token},
+    cache::{TokenHash, VerdictCache, hash_token},
+    single_flight::SingleFlight,
 };
 
 const MAX_TOKEN_LEN: usize = 4096;
@@ -43,6 +44,8 @@ pub struct MeEndpointVerifier {
     http: reqwest::Client,
     me_url: String,
     cache: VerdictCache,
+    /// One PI call per token at a time: a burst of requests with a fresh token shares it.
+    inflight: SingleFlight<TokenHash, Result<Actor, VerifyError>>,
     positive_ttl: Duration,
     negative_ttl: Duration,
 }
@@ -71,6 +74,7 @@ impl MeEndpointVerifier {
             http,
             me_url: format!("{}/v1/me", config.base_url.trim_end_matches('/')),
             cache: VerdictCache::new(config.max_cache_entries),
+            inflight: SingleFlight::new(),
             positive_ttl: config.positive_ttl,
             negative_ttl: config.negative_ttl,
         })
@@ -142,14 +146,26 @@ impl IdentityVerifier for MeEndpointVerifier {
         if let Some(verdict) = self.cache.get(&key, Instant::now()) {
             return verdict;
         }
-        let verdict = self.ask_pi(token).await;
-        let ttl = match verdict {
-            Ok(_) => self.positive_ttl,
-            Err(VerifyError::Unauthenticated) => self.negative_ttl,
-            Err(VerifyError::Unavailable) => Duration::ZERO,
-        };
-        self.cache.insert(key, verdict.clone(), ttl, Instant::now());
-        verdict
+        self.inflight
+            .run(key, || async {
+                let verdict = self.ask_pi(token).await;
+                let ttl = match verdict {
+                    Ok(_) => self.positive_ttl,
+                    Err(VerifyError::Unauthenticated) => self.negative_ttl,
+                    Err(VerifyError::Unavailable) => Duration::ZERO,
+                };
+                // Cached before the flight ends, so a call arriving after it finds the verdict.
+                self.cache.insert(key, verdict.clone(), ttl, Instant::now());
+                verdict
+            })
+            .await
+    }
+
+    fn cached(&self, token: &str) -> Option<Result<Actor, VerifyError>> {
+        if !plausible(token) {
+            return Some(Err(VerifyError::Unauthenticated));
+        }
+        self.cache.get(&hash_token(token), Instant::now())
     }
 }
 

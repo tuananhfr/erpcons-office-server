@@ -5,7 +5,7 @@ use super::{
     Caller, Documents,
     audit::{self, Subject},
 };
-use crate::{Action, DocError, Folder, Name, Resource, authorize};
+use crate::{Action, DocError, Folder, FolderPath, Name, Resource, authorize};
 
 /// A rename and/or move; at least one is set.
 pub struct FolderPatch {
@@ -58,6 +58,29 @@ fn name_conflict(err: office_db::Error) -> DocError {
 }
 
 impl Documents {
+    /// An active folder with its path; a trashed one is as missing as another owner's.
+    pub async fn get_folder(&self, c: &Caller<'_>, id: Uuid) -> Result<FolderPath, DocError> {
+        let folder = active_folder(&self.db, c, id, Action::Read).await?;
+        let rows = folders::ancestors(&self.db, c.owner(), id)
+            .await
+            .map_err(DocError::db)?;
+        let mut ancestors = Vec::with_capacity(rows.len());
+        for row in rows {
+            authorize(
+                c.actor,
+                Resource::Folder {
+                    owner_id: &row.owner_id,
+                },
+                Action::Read,
+            )?;
+            ancestors.push(row.into());
+        }
+        Ok(FolderPath {
+            folder: folder.into(),
+            ancestors,
+        })
+    }
+
     pub async fn create_folder(
         &self,
         c: &Caller<'_>,

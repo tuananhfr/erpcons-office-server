@@ -66,6 +66,8 @@ impl TestApp {
             api: ApiConfig {
                 ip_rate: UNLIMITED,
                 actor_rate: UNLIMITED,
+                verify_rate: UNLIMITED,
+                max_concurrent_uploads: 1000,
                 ..ApiConfig::default()
             },
             identity: MeEndpointConfig::new(pi.base_url()),
@@ -252,6 +254,25 @@ impl TestApp {
             request = request.header("if-match", etag);
         }
         request.body(bytes).send().await.expect("request")
+    }
+
+    /// `DELETE` (trash) of a folder or document path; asserts 204.
+    pub async fn trash(&self, token: &str, path: &str) {
+        let response = self
+            .request(Method::DELETE, path, token)
+            .send()
+            .await
+            .expect("trash");
+        assert_eq!(response.status(), 204, "trash {path}");
+    }
+
+    /// `POST {path}/purge` with `key`.
+    pub async fn purge(&self, token: &str, path: &str, key: &str) -> Response {
+        self.request(Method::POST, &format!("{path}/purge"), token)
+            .header("idempotency-key", key)
+            .send()
+            .await
+            .expect("purge")
     }
 
     pub async fn count(&self, sql: &str) -> i64 {

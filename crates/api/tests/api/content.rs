@@ -146,6 +146,11 @@ async fn of_two_saves_on_the_same_base_exactly_one_wins() {
         .await
         .expect("count");
         assert_eq!(rows, 2);
+        assert_eq!(
+            stored_objects(&app.store_dir()) as i64,
+            app.count("SELECT count(*) FROM storage_objects").await,
+            "the loser's bytes are not left behind"
+        );
     }
 }
 
@@ -189,6 +194,11 @@ async fn the_quota_counts_distinct_bytes_and_the_file_limit_applies_to_saves() {
     ok_json(app.upload(&token, "2.docx", &docx("two"), &[]).await, 201).await;
     let full = app.upload(&token, "3.docx", &docx("tri"), &[]).await;
     expect_error(full, 413, "QUOTA_EXCEEDED", false).await;
+    assert_eq!(
+        stored_objects(&app.store_dir()),
+        2,
+        "refused bytes are not kept"
+    );
     let again = app.upload(&token, "4.docx", &docx("one"), &[]).await;
     assert_eq!(again.status(), 201, "bytes already stored cost nothing");
 
@@ -205,6 +215,7 @@ async fn the_quota_counts_distinct_bytes_and_the_file_limit_applies_to_saves() {
         .put_content(&token, id(&one), Some(&base), docx("tri"))
         .await;
     expect_error(over_quota, 413, "QUOTA_EXCEEDED", false).await;
+    assert_eq!(stored_objects(&app.store_dir()), 2);
     assert_eq!(app.count("SELECT count(*) FROM documents").await, 3);
     assert_eq!(versions(&app).await, 3);
 
@@ -220,4 +231,177 @@ async fn the_quota_counts_distinct_bytes_and_the_file_limit_applies_to_saves() {
             "max_file_bytes": sample * 2,
         })
     );
+}
+
+#[tokio::test]
+async fn an_actor_at_its_quota_stores_nothing() {
+    let one = docx("one");
+    let limit = (one.len() + docx("two").len()) as u64;
+    let Some(app) = TestApp::spawn_with(|s| s.api.quota.limit_bytes = limit).await else {
+        return;
+    };
+    let token = app.token().await;
+    let doc = ok_json(app.upload(&token, "1.docx", &one, &[]).await, 201).await;
+    ok_json(app.upload(&token, "2.docx", &docx("two"), &[]).await, 201).await;
+    let refused = app.upload(&token, "3.docx", &docx("tri"), &[]).await;
+    expect_error(refused, 413, "QUOTA_EXCEEDED", false).await;
+    let blank = app
+        .post_json("/api/v1/documents", &token, &json!({ "kind": "word" }))
+        .await;
+    expect_error(blank, 413, "QUOTA_EXCEEDED", false).await;
+    let base = doc_etag(&app, &token, id(&doc)).await;
+    let save = app
+        .put_content(&token, id(&doc), Some(&base), docx("tri"))
+        .await;
+    expect_error(save, 413, "QUOTA_EXCEEDED", false).await;
+    assert_eq!(stored_objects(&app.store_dir()), 2);
+    assert_eq!(versions(&app).await, 2);
+}
+
+#[tokio::test]
+async fn bytes_another_document_uses_survive_a_refused_request() {
+    let own = docx("own");
+    let shared = docx("shared");
+    let limit = (own.len() + own.len() / 2) as u64;
+    let Some(app) = TestApp::spawn_with(|s| s.api.quota.limit_bytes = limit).await else {
+        return;
+    };
+    let owner = app.token().await;
+    let theirs = ok_json(app.upload(&owner, "s.docx", &shared, &[]).await, 201).await;
+    let other = app.token_of("usr_mock_binh", "Trần Thị Bình").await;
+    let mine = ok_json(app.upload(&other, "o.docx", &own, &[]).await, 201).await;
+
+    let upload = app.upload(&other, "copy.docx", &shared, &[]).await;
+    expect_error(upload, 413, "QUOTA_EXCEEDED", false).await;
+    let base = doc_etag(&app, &other, id(&mine)).await;
+    let save = app
+        .put_content(&other, id(&mine), Some(&base), shared.clone())
+        .await;
+    expect_error(save, 413, "QUOTA_EXCEEDED", false).await;
+
+    assert_eq!(stored_objects(&app.store_dir()), 2);
+    let content = app
+        .get_as(
+            &format!("/api/v1/documents/{}/content", id(&theirs)),
+            &owner,
+        )
+        .await;
+    assert_eq!(content.status(), 200);
+    assert_eq!(content.bytes().await.expect("bytes").as_ref(), shared);
+}
+
+/// Makes the current version of `doc` one written by `author_id`, with the same content.
+async fn version_by(app: &TestApp, doc: &str, author_id: &str) {
+    let version = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO document_versions
+             (id, document_id, seq, storage_object_id, sha256, bytes, author_id, author_name_snapshot)
+         SELECT $1, v.document_id, v.seq + 1, v.storage_object_id, v.sha256, v.bytes, $3, 'Other'
+         FROM documents d JOIN document_versions v ON v.id = d.current_version_id
+         WHERE d.id = $2::uuid",
+    )
+    .bind(version)
+    .bind(doc)
+    .bind(author_id)
+    .execute(app.pool())
+    .await
+    .expect("version row");
+    sqlx::query("UPDATE documents SET current_version_id = $1, etag = $2 WHERE id = $3::uuid")
+        .bind(version)
+        .bind(format!("\"{}\"", version.simple()))
+        .bind(doc)
+        .execute(app.pool())
+        .await
+        .expect("current version");
+}
+
+#[tokio::test]
+async fn a_save_repeated_after_a_lost_response_answers_the_saved_version() {
+    let v1 = docx("v1");
+    let v2 = docx("v2 replayed");
+    let limit = (v1.len() + v2.len()) as u64;
+    let Some(app) = TestApp::spawn_with(|s| s.api.quota.limit_bytes = limit).await else {
+        return;
+    };
+    let token = app.token().await;
+    let doc = ok_json(app.upload(&token, "a.docx", &v1, &[]).await, 201).await;
+    let e1 = doc_etag(&app, &token, id(&doc)).await;
+    let first = app
+        .put_content(&token, id(&doc), Some(&e1), v2.clone())
+        .await;
+    let e2 = etag(&first);
+    let first = ok_json(first, 200).await;
+    assert_eq!(first["version"], 2);
+
+    // The actor is now exactly at its quota: a replay costs nothing, so it still succeeds.
+    let replay = app
+        .put_content(&token, id(&doc), Some(&e1), v2.clone())
+        .await;
+    assert_eq!(etag(&replay), e2);
+    assert_eq!(ok_json(replay, 200).await, first);
+    assert_eq!(versions(&app).await, 2, "no version was added");
+    assert_eq!(stored_objects(&app.store_dir()), 2);
+
+    let other_bytes = app
+        .put_content(&token, id(&doc), Some(&e1), docx("v2 changed"))
+        .await;
+    assert_eq!(expect_conflict(other_bytes).await, 2);
+    let new_save = app
+        .put_content(&token, id(&doc), Some(&e2), docx("v3"))
+        .await;
+    expect_error(new_save, 413, "QUOTA_EXCEEDED", false).await;
+
+    let intruder = app.token_of("usr_mock_binh", "Trần Thị Bình").await;
+    let foreign = app
+        .put_content(&intruder, id(&doc), Some(&e1), v2.clone())
+        .await;
+    expect_error(foreign, 404, "NOT_FOUND", false).await;
+    assert_eq!(versions(&app).await, 2);
+}
+
+#[tokio::test]
+async fn only_the_save_right_before_counts_as_a_repeat() {
+    let Some(app) = TestApp::spawn().await else {
+        return;
+    };
+    let token = app.token().await;
+    let doc = app.create_blank(&token, "word", None, None).await;
+    let e1 = doc_etag(&app, &token, id(&doc)).await;
+    let v2 = docx("two");
+    let e2 = etag(
+        &app.put_content(&token, id(&doc), Some(&e1), v2.clone())
+            .await,
+    );
+    let v3 = docx("three");
+    let saved = app
+        .put_content(&token, id(&doc), Some(&e2), v3.clone())
+        .await;
+    assert_eq!(saved.status(), 200);
+    let two_back = app
+        .put_content(&token, id(&doc), Some(&e1), v3.clone())
+        .await;
+    assert_eq!(expect_conflict(two_back).await, 3);
+    let old_bytes = app
+        .put_content(&token, id(&doc), Some(&e1), v2.clone())
+        .await;
+    assert_eq!(
+        expect_conflict(old_bytes).await,
+        3,
+        "v2 is no longer current"
+    );
+    let replay = app
+        .put_content(&token, id(&doc), Some(&e2), v3.clone())
+        .await;
+    assert_eq!(ok_json(replay, 200).await["version"], 3);
+
+    // A version another author made is never taken for this actor's repeat.
+    let e3 = doc_etag(&app, &token, id(&doc)).await;
+    let other = app.token_of("usr_mock_binh", "Trần Thị Bình").await;
+    assert_eq!(app.get_as("/api/v1/me", &other).await.status(), 200);
+    version_by(&app, id(&doc), "usr_mock_binh").await;
+    let not_mine = app
+        .put_content(&token, id(&doc), Some(&e3), v3.clone())
+        .await;
+    assert_eq!(expect_conflict(not_mine).await, 4);
+    assert_eq!(versions(&app).await, 4);
 }

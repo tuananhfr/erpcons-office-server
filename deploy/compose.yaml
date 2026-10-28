@@ -41,7 +41,9 @@ services:
       ERPCONS_ORPHAN_INTERVAL_SECS: ${ERPCONS_ORPHAN_INTERVAL_SECS:-3600}
       ERPCONS_TRASH_RETENTION_DAYS: ${ERPCONS_TRASH_RETENTION_DAYS:-30}
       # Stored bytes with no row are deleted once this old (at least 60).
-      ERPCONS_ORPHAN_MIN_AGE_SECS: ${ERPCONS_ORPHAN_MIN_AGE_SECS:-3600}
+      ERPCONS_ORPHAN_MIN_AGE_SECS: ${ERPCONS_ORPHAN_MIN_AGE_SECS:-600}
+      # Days audit rows are kept (0 = forever).
+      ERPCONS_AUDIT_RETENTION_DAYS: ${ERPCONS_AUDIT_RETENTION_DAYS:-180}
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     ports:
       - "127.0.0.1:8710:8710"

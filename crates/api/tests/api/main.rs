@@ -9,5 +9,6 @@ mod idor;
 mod jobs;
 mod limits;
 mod me;
+mod purge;
 mod rejections;
 mod support;

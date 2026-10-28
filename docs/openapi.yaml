@@ -18,10 +18,20 @@ info:
     body, path or query answers 422 `INVALID_REQUEST`, a body over the limit 413 `TOO_LARGE`, a method a path does not
     have 405 `METHOD_NOT_ALLOWED`.
 
-    **Idempotency.** The create operations take `Idempotency-Key` (1–100 chars); a repeat with the same key and body
-    within 24 h returns the first response, a repeat with a different body answers 422 `IDEMPOTENCY_MISMATCH`, a repeat
-    while the first is still running 503 `UNAVAILABLE` (retryable). Restore, trash and save need no key: repeating them
-    is harmless (restoring an active item returns it, trashing a trashed one is a no-op, a repeated save fails `If-Match`).
+    **Body limits.** JSON bodies stop at 64 KiB (413 `TOO_LARGE`, before any byte is read when `Content-Length` says
+    so). Only the multipart `POST /documents` and `PUT /documents/{document_id}/content` take files, up to the
+    per-file limit in `Me.quota.max_file_bytes`.
+
+    **Rate limits.** Any authenticated operation may answer 429 `RATE_LIMITED` (retryable, with `Retry-After`): per
+    client address (an IPv6 client counts by its /64), per actor, per client address for token checks that must ask
+    PI (a token already verified and cached does not count), and per actor for uploads and saves streaming at the same
+    time (a few at once).
+
+    **Idempotency.** The create and purge operations take `Idempotency-Key` (1–100 chars); a repeat with the same key
+    and body within 24 h returns the first response, a repeat with a different body answers 422
+    `IDEMPOTENCY_MISMATCH`, a repeat while the first is still running 503 `UNAVAILABLE` (retryable). Restore, trash and save need no key: repeating them
+    is harmless (restoring an active item returns it, trashing a trashed one is a no-op, a repeated save answers the
+    version it made, see `saveContent`).
 
     **Logging.** The server never logs titles, folder names, bytes or tokens.
 servers:
@@ -132,6 +142,19 @@ paths:
   /folders/{folder_id}:
     parameters:
       - $ref: '#/components/parameters/FolderId'
+    get:
+      operationId: getFolder
+      tags: [folders]
+      summary: An active folder and its path from the top (for breadcrumbs)
+      responses:
+        '200':
+          description: The folder.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FolderPath' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
     patch:
       operationId: updateFolder
       tags: [folders]
@@ -180,6 +203,26 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
+  /folders/{folder_id}/purge:
+    parameters:
+      - $ref: '#/components/parameters/FolderId'
+    post:
+      operationId: purgeFolder
+      tags: [folders]
+      summary: Delete a trashed folder for good, with what was trashed together with it
+      description: |
+        Only a folder in the trash; an active one, one already purged or another actor's answers 404. Subfolders and
+        documents trashed in the same operation go with it and free their quota. Items inside it that had been trashed
+        on their own earlier stay in the trash and are restored into the root. Cannot be undone.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: Purged. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /documents:
     post:
       operationId: createDocument
@@ -222,6 +265,7 @@ paths:
         '413': { $ref: '#/components/responses/TooLarge' }
         '422': { $ref: '#/components/responses/Unprocessable' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /documents/{document_id}:
     parameters:
       - $ref: '#/components/parameters/DocumentId'
@@ -285,6 +329,25 @@ paths:
               schema: { $ref: '#/components/schemas/Document' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /documents/{document_id}/purge:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    post:
+      operationId: purgeDocument
+      tags: [documents]
+      summary: Delete a trashed document and all its versions for good
+      description: |
+        Only a document in the trash; an active one, one already purged or another actor's answers 404. Its versions
+        stop counting against the quota; bytes another document still uses are kept. Cannot be undone.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204': { description: Purged. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /documents/{document_id}/content:
     parameters:
       - $ref: '#/components/parameters/DocumentId'
@@ -307,6 +370,12 @@ paths:
       operationId: saveContent
       tags: [documents]
       summary: Save a new immutable version. 200 means durable (§07, §11); nothing is written on any error.
+      description: |
+        **Repeated save.** A client whose 200 was lost retries with the same `If-Match` and bytes. When `If-Match` is
+        the ETag of the version right before the current one, the current version was saved by the caller, and the
+        bytes have the same sha256, the save already happened: the answer is 200 with the current version and ETag,
+        no version is added and no quota is used. Anything else whose `If-Match` is not current (other bytes, a
+        version made by someone else, an older base) answers 409.
       parameters:
         - name: If-Match
           in: header
@@ -373,7 +442,7 @@ paths:
     get:
       operationId: listTrash
       tags: [documents]
-      summary: Trashed folders and documents, most recently trashed first. Purged 30 days after trashing.
+      summary: Trashed folders and documents, most recently trashed first. Purged 30 days after trashing, or on request.
       parameters:
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Limit'
@@ -475,6 +544,15 @@ components:
         trashed_at: { type: [string, 'null'], format: date-time }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    FolderPath:
+      type: object
+      required: [folder, ancestors]
+      properties:
+        folder: { $ref: '#/components/schemas/Folder' }
+        ancestors:
+          type: array
+          description: From the top-level folder down to the direct parent; empty for a top-level folder. The root is not listed.
+          items: { $ref: '#/components/schemas/Folder' }
     Document:
       type: object
       required: [id, folder_id, title, kind, format, size, version, save_state, state, created_at, updated_at]
@@ -557,7 +635,7 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
     TooManyRequests:
-      description: '`RATE_LIMITED`, with `Retry-After`.'
+      description: '`RATE_LIMITED` (retryable), with `Retry-After`.'
       headers:
         Retry-After:
           schema: { type: integer, minimum: 1 }

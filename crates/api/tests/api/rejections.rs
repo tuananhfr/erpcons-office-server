@@ -6,7 +6,7 @@ use serde_json::json;
 use crate::support::{TestApp, expect_error, multipart, new_key};
 
 /// A body sent in chunks with no `Content-Length`.
-fn chunked(bytes: Vec<u8>) -> Body {
+pub fn chunked(bytes: Vec<u8>) -> Body {
     let chunks: Vec<Result<Vec<u8>, std::io::Error>> =
         bytes.chunks(64 * 1024).map(|c| Ok(c.to_vec())).collect();
     Body::wrap_stream(stream::iter(chunks))

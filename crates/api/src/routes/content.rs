@@ -18,6 +18,7 @@ use super::respond::{self, caller};
 use crate::{
     ApiError, AppState, Authenticated, ErrorCode, RequestId,
     extract::{ApiPath, if_match},
+    rate_limit::upload_slot,
 };
 
 const X_DOCUMENT_VERSION: HeaderName = HeaderName::from_static("x-document-version");
@@ -45,7 +46,8 @@ pub(crate) async fn get(
     Ok(response)
 }
 
-/// Saves a new version; the body streams to storage, it is never held in memory whole.
+/// Saves a new version; the body streams to storage, it is never held in memory whole. A repeat
+/// of the save that made the current version answers that version (see `replay_or_conflict`).
 pub(crate) async fn put(
     State(state): State<AppState>,
     Extension(rid): Extension<RequestId>,
@@ -55,6 +57,7 @@ pub(crate) async fn put(
     body: Body,
 ) -> Result<Response, ApiError> {
     let tags = if_match(&headers)?.ok_or(ErrorCode::PreconditionRequired)?;
+    let _slot = upload_slot(&state, &actor.actor_id)?;
     let reader = StreamReader::new(body.into_data_stream().map_err(io::Error::other));
     let doc = state
         .docs

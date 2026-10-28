@@ -6,6 +6,8 @@ pub enum Action {
     Write,
     Trash,
     Restore,
+    /// Delete for good, from the trash.
+    Purge,
 }
 
 /// What is being accessed, as loaded from the database.
@@ -28,7 +30,11 @@ pub fn authorize(actor: &Actor, resource: Resource<'_>, action: Action) -> Resul
     };
     let is_owner = !actor.actor_id.is_empty() && actor.actor_id == owner_id;
     match action {
-        Action::Read | Action::Write | Action::Trash | Action::Restore if is_owner => Ok(()),
+        Action::Read | Action::Write | Action::Trash | Action::Restore | Action::Purge
+            if is_owner =>
+        {
+            Ok(())
+        }
         _ => Err(NotFound),
     }
 }
@@ -39,7 +45,13 @@ mod tests {
 
     use super::*;
 
-    const ACTIONS: [Action; 4] = [Action::Read, Action::Write, Action::Trash, Action::Restore];
+    const ACTIONS: [Action; 5] = [
+        Action::Read,
+        Action::Write,
+        Action::Trash,
+        Action::Restore,
+        Action::Purge,
+    ];
 
     fn actor(id: &str) -> Actor {
         Actor {

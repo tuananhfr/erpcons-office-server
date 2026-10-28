@@ -4,7 +4,7 @@ use office_api::{ApiConfig, RateConfig, TrustedProxies};
 use office_db::PoolConfig;
 use office_documents::{
     QuotaConfig,
-    jobs::{OrphanConfig, PurgeConfig},
+    jobs::{AuditRetentionConfig, OrphanConfig, PurgeConfig},
 };
 use office_identity::MeEndpointConfig;
 
@@ -88,6 +88,15 @@ impl ServerConfig {
                 "ERPCONS_RATE_ACTOR_PER_SEC",
                 defaults.actor_rate,
             )?,
+            verify_rate: vars.rate(
+                "ERPCONS_RATE_VERIFY_BURST",
+                "ERPCONS_RATE_VERIFY_PER_SEC",
+                defaults.verify_rate,
+            )?,
+            max_concurrent_uploads: vars.positive(
+                "ERPCONS_MAX_CONCURRENT_UPLOADS",
+                defaults.max_concurrent_uploads,
+            )?,
             // On by default: the server is reachable only through the local Apache proxy (plan §8).
             trust_forwarded_for: vars.parsed("ERPCONS_TRUST_FORWARDED_FOR", true)?,
             trusted_proxies: vars.parsed("ERPCONS_TRUSTED_PROXIES", TrustedProxies::loopback())?,
@@ -135,7 +144,7 @@ impl<F: Fn(&str) -> Option<String>> Vars<F> {
         if days == 0 {
             return Err(ConfigError::Invalid("ERPCONS_TRASH_RETENTION_DAYS"));
         }
-        let min_age: u64 = self.parsed("ERPCONS_ORPHAN_MIN_AGE_SECS", 3600)?;
+        let min_age: u64 = self.parsed("ERPCONS_ORPHAN_MIN_AGE_SECS", 600)?;
         // Younger objects may belong to a save still between its put and its commit.
         if min_age < MIN_ORPHAN_AGE_SECS {
             return Err(ConfigError::Invalid("ERPCONS_ORPHAN_MIN_AGE_SECS"));
@@ -151,7 +160,28 @@ impl<F: Fn(&str) -> Option<String>> Vars<F> {
                 min_age: Duration::from_secs(min_age),
                 ..OrphanConfig::default()
             },
+            audit: self.audit_retention()?,
         })
+    }
+
+    /// `None` when `ERPCONS_AUDIT_RETENTION_DAYS` is 0: audit rows are then kept forever.
+    fn audit_retention(&self) -> Result<Option<AuditRetentionConfig>, ConfigError> {
+        let defaults = AuditRetentionConfig::default();
+        let days: u64 = self.parsed(
+            "ERPCONS_AUDIT_RETENTION_DAYS",
+            defaults.retention.as_secs() / (24 * 3600),
+        )?;
+        Ok((days > 0).then(|| AuditRetentionConfig {
+            retention: Duration::from_secs(days.saturating_mul(24 * 3600)),
+            ..defaults
+        }))
+    }
+
+    fn positive(&self, name: &'static str, default: usize) -> Result<usize, ConfigError> {
+        match self.parsed(name, default)? {
+            0 => Err(ConfigError::Invalid(name)),
+            n => Ok(n),
+        }
     }
 
     fn rate(
@@ -209,7 +239,13 @@ mod tests {
         assert_eq!(c.jobs.purge_every, Some(Duration::from_secs(3600)));
         assert_eq!(c.jobs.purge.retention, Duration::from_secs(30 * 24 * 3600));
         assert_eq!(c.jobs.orphans_every, Some(Duration::from_secs(3600)));
-        assert_eq!(c.jobs.orphans.min_age, Duration::from_secs(3600));
+        assert_eq!(c.jobs.orphans.min_age, Duration::from_secs(600));
+        assert_eq!(
+            c.jobs.audit.map(|a| a.retention),
+            Some(Duration::from_secs(180 * 24 * 3600))
+        );
+        assert_eq!(c.api.max_concurrent_uploads, 3);
+        assert_eq!(c.api.verify_rate, ApiConfig::default().verify_rate);
     }
 
     #[test]
@@ -228,6 +264,10 @@ mod tests {
             ("ERPCONS_ORPHAN_INTERVAL_SECS", "0"),
             ("ERPCONS_TRASH_RETENTION_DAYS", "7"),
             ("ERPCONS_ORPHAN_MIN_AGE_SECS", "7200"),
+            ("ERPCONS_AUDIT_RETENTION_DAYS", "0"),
+            ("ERPCONS_MAX_CONCURRENT_UPLOADS", "1"),
+            ("ERPCONS_RATE_VERIFY_BURST", "7"),
+            ("ERPCONS_RATE_VERIFY_PER_SEC", "0.25"),
         ])
         .expect("config");
         assert_eq!(c.bind.port(), 8710);
@@ -258,6 +298,15 @@ mod tests {
         assert_eq!(c.jobs.orphans_every, None, "0 turns the sweep off");
         assert_eq!(c.jobs.purge.retention, Duration::from_secs(7 * 24 * 3600));
         assert_eq!(c.jobs.orphans.min_age, Duration::from_secs(7200));
+        assert_eq!(c.jobs.audit, None, "0 keeps audit rows forever");
+        assert_eq!(c.api.max_concurrent_uploads, 1);
+        assert_eq!(
+            c.api.verify_rate,
+            RateConfig {
+                burst: 7,
+                per_second: 0.25
+            }
+        );
     }
 
     #[test]
@@ -286,6 +335,9 @@ mod tests {
             ("ERPCONS_ORPHAN_MIN_AGE_SECS", "59"),
             ("ERPCONS_PURGE_INTERVAL_SECS", "-1"),
             ("ERPCONS_TRUSTED_PROXIES", "10.0.0.0/33"),
+            ("ERPCONS_MAX_CONCURRENT_UPLOADS", "0"),
+            ("ERPCONS_RATE_VERIFY_PER_SEC", "0"),
+            ("ERPCONS_AUDIT_RETENTION_DAYS", "-1"),
         ] {
             assert_eq!(
                 load(&[bad]).err(),

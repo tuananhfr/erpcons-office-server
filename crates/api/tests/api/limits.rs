@@ -1,8 +1,17 @@
+use std::time::Duration;
+
 use office_api::RateConfig;
+use office_documents::FailPoint;
 use office_identity::testing::access_token_as;
 use pi_mock::User;
+use reqwest::Method;
+use serde_json::json;
 
-use crate::support::{TestApp, expect_error};
+use crate::{
+    documents::doc_etag,
+    rejections::chunked,
+    support::{TestApp, expect_error, new_key, ok_json, pdf},
+};
 
 const TIGHT: RateConfig = RateConfig {
     burst: 2,
@@ -143,4 +152,119 @@ async fn declared_oversized_body_is_413() {
         .await
         .expect("request");
     expect_error(response, 413, "TOO_LARGE", false).await;
+}
+
+#[tokio::test]
+async fn ipv6_clients_are_limited_by_their_64() {
+    let Some(app) = TestApp::spawn_with(|s| {
+        s.api.ip_rate = RateConfig {
+            burst: 1,
+            per_second: 0.01,
+        };
+        s.api.trust_forwarded_for = true;
+    })
+    .await
+    else {
+        return;
+    };
+    assert_eq!(health_from(&app, "2001:db8:1:2::1").await, 200);
+    assert_eq!(
+        health_from(&app, "2001:db8:1:2::ffff").await,
+        429,
+        "another address of the same /64 shares the bucket"
+    );
+    assert_eq!(health_from(&app, "2001:db8:1:3::1").await, 200);
+}
+
+/// A PDF of exactly `len` bytes.
+fn pdf_of(len: usize) -> Vec<u8> {
+    let mut bytes = pdf("big");
+    bytes.resize(len, b' ');
+    bytes
+}
+
+#[tokio::test]
+async fn json_bodies_stop_at_64_kib_while_uploads_and_saves_stream_on() {
+    let Some(app) = TestApp::spawn().await else {
+        return;
+    };
+    let token = app.token().await;
+    let mib = 1024 * 1024;
+    let big_json = serde_json::to_vec(&json!({ "name": "x".repeat(mib) })).expect("json");
+    // Two chunks over the limit: read and refused at 64 KiB, with no length to go by.
+    let chunked_json =
+        serde_json::to_vec(&json!({ "name": "x".repeat(128 * 1024) })).expect("json");
+    let declared = app
+        .request(Method::POST, "/api/v1/folders", &token)
+        .header("idempotency-key", new_key())
+        .header("content-type", "application/json")
+        .body(big_json)
+        .send()
+        .await
+        .expect("request");
+    expect_error(declared, 413, "TOO_LARGE", false).await;
+    let blank = app
+        .request(Method::POST, "/api/v1/documents", &token)
+        .header("idempotency-key", new_key())
+        .header("content-type", "application/json")
+        .body(chunked(chunked_json.clone()))
+        .send()
+        .await
+        .expect("request");
+    expect_error(blank, 413, "TOO_LARGE", false).await;
+
+    let doc = ok_json(app.upload(&token, "big.pdf", &pdf_of(mib), &[]).await, 201).await;
+    let id = doc["id"].as_str().expect("id");
+    assert_eq!(doc["size"], mib);
+    let rename = app
+        .request(Method::PATCH, &format!("/api/v1/documents/{id}"), &token)
+        .header("content-type", "application/json")
+        .body(chunked(chunked_json))
+        .send()
+        .await
+        .expect("request");
+    expect_error(rename, 413, "TOO_LARGE", false).await;
+    let tag = doc_etag(&app, &token, id).await;
+    let saved = app
+        .put_content(&token, id, Some(&tag), pdf_of(2 * mib))
+        .await;
+    assert_eq!(ok_json(saved, 200).await["size"], 2 * mib);
+    assert_eq!(app.count("SELECT count(*) FROM folders").await, 0);
+}
+
+#[tokio::test]
+async fn an_actor_streams_a_bounded_number_of_uploads_at_once() {
+    let Some(app) = TestApp::spawn_with(|s| s.api.max_concurrent_uploads = 1).await else {
+        return;
+    };
+    let token = app.token().await;
+    let other = app.token_of("usr_mock_binh", "Trần Thị Bình").await;
+    let doc = app.create_blank(&token, "pdf", None, None).await;
+    let id = doc["id"].as_str().expect("id").to_owned();
+    let tag = doc_etag(&app, &token, &id).await;
+
+    let held = app.documents().fail_points().hold(FailPoint::AfterPut);
+    let save = app.put_content(&token, &id, Some(&tag), pdf("v2"));
+    let meanwhile = async {
+        tokio::time::timeout(Duration::from_secs(10), held.reached())
+            .await
+            .expect("the save reaches the hold");
+        let upload = app.upload(&token, "a.pdf", &pdf("a"), &[]).await;
+        let retry_after = upload.headers()["retry-after"].clone();
+        assert_eq!(retry_after, "1");
+        expect_error(upload, 429, "RATE_LIMITED", true).await;
+        let second_save = app.put_content(&token, &id, Some(&tag), pdf("v2b")).await;
+        expect_error(second_save, 429, "RATE_LIMITED", true).await;
+        let theirs = app.upload(&other, "b.pdf", &pdf("b"), &[]).await;
+        assert_eq!(theirs.status(), 201, "another actor has its own slots");
+        let blank = app
+            .post_json("/api/v1/documents", &token, &json!({ "kind": "word" }))
+            .await;
+        assert_eq!(blank.status(), 201, "a blank document streams nothing");
+        held.release();
+    };
+    let (saved, ()) = tokio::join!(save, meanwhile);
+    assert_eq!(ok_json(saved, 200).await["version"], 2);
+    let after = app.upload(&token, "a.pdf", &pdf("a"), &[]).await;
+    assert_eq!(after.status(), 201, "the slot is free again");
 }

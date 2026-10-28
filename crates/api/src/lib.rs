@@ -23,27 +23,32 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{HeaderValue, header::CACHE_CONTROL},
     middleware::{from_fn, from_fn_with_state},
-    routing::{get, patch, post},
+    routing::{get, post},
 };
 use tower_http::set_header::SetResponseHeaderLayer;
 
 pub use auth::Authenticated;
-pub use config::{ApiConfig, BODY_OVERHEAD_BYTES, RateConfig};
+pub use config::{ApiConfig, BODY_OVERHEAD_BYTES, JSON_BODY_BYTES, RateConfig};
 pub use error::{ApiError, ErrorCode};
 pub use request_id::RequestId;
 pub use state::AppState;
 pub use trusted_proxies::{InvalidIpNet, IpNet, TrustedProxies};
 
 /// The whole HTTP surface. Layers run outermost first: request id, tracing, per-IP limit, body limit.
+/// JSON bodies stop at [`JSON_BODY_BYTES`]; only the upload and save routes take more, which they
+/// stream and hold to the per-file limit themselves.
 pub fn router(state: AppState) -> Router {
-    let body_limit = usize::try_from(state.config.max_body_bytes).unwrap_or(usize::MAX);
-    let api = Router::new()
+    let json_limit = JSON_BODY_BYTES.min(state.config.max_body_bytes);
+    let json_limit = usize::try_from(json_limit).unwrap_or(usize::MAX);
+    let json = Router::new()
         .route("/health", get(routes::health::get))
         .route("/me", get(routes::me::get))
         .route("/folders", post(routes::folders::create))
         .route(
             "/folders/{folder_id}",
-            patch(routes::folders::update).delete(routes::folders::trash),
+            get(routes::folders::get)
+                .patch(routes::folders::update)
+                .delete(routes::folders::trash),
         )
         .route(
             "/folders/{folder_id}/children",
@@ -53,7 +58,7 @@ pub fn router(state: AppState) -> Router {
             "/folders/{folder_id}/restore",
             post(routes::folders::restore),
         )
-        .route("/documents", post(routes::upload::create))
+        .route("/folders/{folder_id}/purge", post(routes::folders::purge))
         .route(
             "/documents/{document_id}",
             get(routes::documents::get)
@@ -65,19 +70,32 @@ pub fn router(state: AppState) -> Router {
             post(routes::documents::restore),
         )
         .route(
-            "/documents/{document_id}/content",
-            get(routes::content::get).put(routes::content::put),
+            "/documents/{document_id}/purge",
+            post(routes::documents::purge),
         )
         .route(
             "/documents/{document_id}/versions",
             get(routes::documents::versions),
         )
         .route("/trash", get(routes::trash::list))
+        .route_layer(from_fn_with_state(
+            state.clone(),
+            body_limit::reject_oversized_json,
+        ));
+    // The blank-document JSON body of `POST /documents` is still held to `json_limit` when read.
+    let streamed = Router::new()
+        .route("/documents", post(routes::upload::create))
+        .route(
+            "/documents/{document_id}/content",
+            get(routes::content::get).put(routes::content::put),
+        );
+    let api = json
+        .merge(streamed)
         .method_not_allowed_fallback(routes::method_not_allowed);
     Router::new()
         .nest("/api/v1", api)
         .fallback(routes::not_found)
-        .layer(DefaultBodyLimit::max(body_limit))
+        .layer(DefaultBodyLimit::max(json_limit))
         .layer(from_fn_with_state(
             state.clone(),
             body_limit::reject_oversized,
