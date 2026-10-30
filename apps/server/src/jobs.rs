@@ -1,4 +1,4 @@
-//! The purge, orphan, audit retention and mail outbox jobs on fixed intervals, beside the HTTP server.
+//! The purge, orphan, audit retention, mail outbox and sign-up jobs beside the HTTP server.
 use std::{future::Future, sync::Arc, time::Duration};
 
 use office_db::PgPool;
@@ -6,10 +6,11 @@ use office_documents::{
     Documents,
     jobs::{AuditRetentionConfig, OrphanConfig, PurgeConfig},
 };
-use office_mail::{MailTransport, OutboxConfig, run_outbox};
+use office_mail::{MailTransport, OutboxConfig, SignupTokens, run_outbox};
+use office_signup::{PiRegistrar, PushConfig, Signups, expire, run_push};
 use tokio::{
     task::JoinHandle,
-    time::{Instant, MissedTickBehavior, interval_at},
+    time::{Instant, MissedTickBehavior, interval_at, timeout},
 };
 use tracing::{error, info};
 
@@ -19,11 +20,24 @@ const AUDIT_EVERY: Duration = Duration::from_secs(3600);
 /// "Shared with you" should arrive within a minute; an empty outbox costs one indexed query.
 const MAIL_EVERY: Duration = Duration::from_secs(20);
 
+/// Verified sign-ups wait at most this long for PI when nothing wakes the job.
+const SIGNUP_PUSH_EVERY: Duration = Duration::from_secs(30);
+/// Unverified sign-ups live 7 days; hourly is close enough.
+const SIGNUP_EXPIRY_EVERY: Duration = Duration::from_secs(3600);
+
 /// The outbox sender, when SMTP is configured.
 pub(crate) struct MailJob {
     pub db: PgPool,
     pub transport: Arc<dyn MailTransport>,
     pub public_origin: String,
+    /// Issues the tokens of verification mails.
+    pub signups: Arc<Signups>,
+}
+
+/// Hands verified sign-ups to PI, when sign-up is open.
+pub(crate) struct SignupJob {
+    pub signups: Arc<Signups>,
+    pub registrar: Arc<dyn PiRegistrar>,
 }
 
 /// `None` interval (or audit config): the job does not run.
@@ -39,7 +53,13 @@ pub(crate) struct JobsConfig {
 pub(crate) struct Jobs(Vec<JoinHandle<()>>);
 
 impl Jobs {
-    pub(crate) fn spawn(docs: &Arc<Documents>, config: &JobsConfig, mail: Option<MailJob>) -> Self {
+    pub(crate) fn spawn(
+        docs: &Arc<Documents>,
+        signups: &Arc<Signups>,
+        config: &JobsConfig,
+        mail: Option<MailJob>,
+        signup: Option<SignupJob>,
+    ) -> Self {
         let mut tasks = Vec::new();
         if let Some(mail) = mail {
             let mail = Arc::new(mail);
@@ -47,13 +67,21 @@ impl Jobs {
                 let mail = mail.clone();
                 async move {
                     let config = OutboxConfig::default();
-                    match run_outbox(&mail.db, &*mail.transport, &mail.public_origin, &config).await
-                    {
+                    let tokens: &dyn SignupTokens = &*mail.signups;
+                    let round = run_outbox(
+                        &mail.db,
+                        &*mail.transport,
+                        &mail.public_origin,
+                        Some(tokens),
+                        &config,
+                    );
+                    match round.await {
                         Ok(r) if r == office_mail::OutboxReport::default() => {}
                         Ok(r) => info!(
                             sent = r.sent,
                             retried = r.retried,
                             failed = r.failed,
+                            dropped = r.dropped,
                             deleted = r.deleted,
                             "mail outbox done"
                         ),
@@ -62,6 +90,24 @@ impl Jobs {
                 }
             }));
         }
+        if let Some(job) = signup {
+            tasks.push(push_signups(job));
+        }
+        let expiring = signups.clone();
+        tasks.push(repeat(SIGNUP_EXPIRY_EVERY, move || {
+            let signups = expiring.clone();
+            async move {
+                match expire(signups.db()).await {
+                    Ok(r) if r == office_signup::ExpiryReport::default() => {}
+                    Ok(r) => info!(
+                        unverified = r.unverified,
+                        finished = r.finished,
+                        "sign-up expiry done"
+                    ),
+                    Err(e) => error!(error = %e, "sign-up expiry failed"),
+                }
+            }
+        }));
         if let Some(every) = config.purge_every {
             let (docs, purge) = (docs.clone(), config.purge);
             tasks.push(repeat(every, move || {
@@ -120,6 +166,28 @@ impl Jobs {
             task.abort();
         }
     }
+}
+
+/// Rounds of the PI job: right after a verification, else every [`SIGNUP_PUSH_EVERY`].
+fn push_signups(job: SignupJob) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let verified = job.signups.verified_signal();
+        let config = PushConfig::default();
+        loop {
+            let _ = timeout(SIGNUP_PUSH_EVERY, verified.notified()).await;
+            match run_push(job.signups.db(), &*job.registrar, &config).await {
+                Ok(r) if r == office_signup::PushReport::default() => {}
+                Ok(r) => info!(
+                    created = r.created,
+                    existing = r.existing,
+                    retried = r.retried,
+                    failed = r.failed,
+                    "sign-ups sent to PI"
+                ),
+                Err(e) => error!(error = %e, "sign-up job failed"),
+            }
+        }
+    })
 }
 
 /// Runs `job` every `every`, first after one interval so a restart loop does not hammer the

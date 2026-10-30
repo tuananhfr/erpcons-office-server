@@ -31,6 +31,7 @@ pub use auth::Authenticated;
 pub use config::{ApiConfig, BODY_OVERHEAD_BYTES, JSON_BODY_BYTES, RateConfig};
 pub use error::{ApiError, ErrorCode};
 pub use office_mail::MailPolicy;
+pub use office_signup::SignupPolicy;
 pub use request_id::RequestId;
 pub use state::AppState;
 pub use trusted_proxies::{InvalidIpNet, IpNet, TrustedProxies};
@@ -111,6 +112,11 @@ pub fn router(state: AppState) -> Router {
         .route("/link", get(routes::public_links::open))
         .route("/link/content", get(routes::public_links::content))
         .route("/trash", get(routes::trash::list))
+        .route(
+            "/signup",
+            get(routes::signup::status).post(routes::signup::create),
+        )
+        .route("/signup/verify", post(routes::signup::verify))
         .route_layer(from_fn_with_state(
             state.clone(),
             body_limit::reject_oversized_json,

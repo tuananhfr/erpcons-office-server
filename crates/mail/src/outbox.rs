@@ -5,7 +5,12 @@ use std::time::Duration;
 use office_db::{PgPool, mail_outbox};
 use tracing::{error, warn};
 
-use crate::{KIND_SHARED, MailTransport, SendError, SharedNotice, render_shared};
+use uuid::Uuid;
+
+use crate::{
+    KIND_SHARED, KIND_SIGNUP_EXISTING, KIND_SIGNUP_VERIFY, MailTransport, SendError, SharedNotice,
+    SignupNotice, SignupTokens, render_shared, render_signup_existing, render_signup_verify,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OutboxConfig {
@@ -40,7 +45,16 @@ pub struct OutboxReport {
     pub sent: u64,
     pub retried: u64,
     pub failed: u64,
+    /// Verification mails of sign-ups that were replaced, verified or expired before sending.
+    pub dropped: u64,
     pub deleted: u64,
+}
+
+/// What became of one mail that did not fail.
+enum Delivery {
+    Sent,
+    /// Nothing to send any more.
+    Dropped,
 }
 
 fn secs(d: Duration) -> i64 {
@@ -58,11 +72,48 @@ fn backoff(config: &OutboxConfig, attempts: i32) -> Duration {
         .min(config.max_backoff)
 }
 
-/// One round: every due mail once, then the cleanup of old rows.
+fn unknown(mail_id: Uuid) -> Result<Delivery, SendError> {
+    error!(mail_id = %mail_id, "outbox row of an unknown kind or payload");
+    Err(SendError::Permanent)
+}
+
+async fn deliver(
+    mail: &mail_outbox::OutboxRow,
+    transport: &dyn MailTransport,
+    public_origin: &str,
+    signups: Option<&dyn SignupTokens>,
+) -> Result<Delivery, SendError> {
+    let rendered = match mail.kind.as_str() {
+        KIND_SHARED => match SharedNotice::from_json(&mail.payload) {
+            Some(notice) => render_shared(&notice, public_origin),
+            None => return unknown(mail.id),
+        },
+        KIND_SIGNUP_VERIFY => {
+            let (Some(notice), Some(signups)) = (SignupNotice::from_json(&mail.payload), signups)
+            else {
+                return unknown(mail.id);
+            };
+            match signups.issue(notice.signup_id).await? {
+                Some(issued) => {
+                    render_signup_verify(&issued.display_name, &issued.token, public_origin)
+                }
+                None => return Ok(Delivery::Dropped),
+            }
+        }
+        KIND_SIGNUP_EXISTING => render_signup_existing(public_origin),
+        _ => return unknown(mail.id),
+    };
+    transport.send(&mail.to_email, &rendered).await?;
+    Ok(Delivery::Sent)
+}
+
+/// One round: every due mail once, then the cleanup of old rows. `signups` issues the tokens of
+/// verification mails; without it they cannot be sent.
 pub async fn run_outbox(
     db: &PgPool,
     transport: &dyn MailTransport,
     public_origin: &str,
+    signups: Option<&dyn SignupTokens>,
     config: &OutboxConfig,
 ) -> Result<OutboxReport, office_db::Error> {
     let mut report = OutboxReport::default();
@@ -74,22 +125,17 @@ pub async fn run_outbox(
             break;
         }
         for mail in &due {
-            let outcome = match (mail.kind.as_str(), SharedNotice::from_json(&mail.payload)) {
-                (KIND_SHARED, Some(notice)) => {
-                    let rendered = render_shared(&notice, public_origin);
-                    transport.send(&mail.to_email, &rendered).await
-                }
-                _ => {
-                    error!(mail_id = %mail.id, "outbox row of an unknown kind or payload");
-                    Err(SendError::Permanent)
-                }
-            };
+            let outcome = deliver(mail, transport, public_origin, signups).await;
             let age = time::OffsetDateTime::now_utc() - mail.created_at;
             let expired = age >= config.give_up_after;
             match outcome {
-                Ok(()) => {
+                Ok(Delivery::Sent) => {
                     mail_outbox::mark_sent(db, mail.id).await?;
                     report.sent += 1;
+                }
+                Ok(Delivery::Dropped) => {
+                    mail_outbox::mark_failed(db, mail.id).await?;
+                    report.dropped += 1;
                 }
                 Err(SendError::Transient) if !expired => {
                     let delay = backoff(config, mail.attempts);

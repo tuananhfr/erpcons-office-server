@@ -1,6 +1,6 @@
 //! Transaction-scoped advisory locks. Order, when a transaction takes several: the actor row, then
 //! the owner's tree, then an object, then document rows, then a sharer's recipients, then the mail
-//! caps. Every writer follows it, so none deadlock.
+//! caps. Every writer follows it, so none deadlock. The sign-up lock is never taken with another.
 use sqlx::PgConnection;
 
 /// Serializes changes to the folder structure of one owner (moves, trash, restore, creation).
@@ -22,6 +22,11 @@ pub async fn recipients(conn: &mut PgConnection, actor_id: &str) -> Result<(), s
 /// take one lock for all of them.
 pub async fn mail_caps(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
     advisory(conn, "mail-caps").await
+}
+
+/// Serializes the sign-up caps (per address, whole server), so parallel sign-ups cannot pass them.
+pub async fn signup_caps(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
+    advisory(conn, "signup-caps").await
 }
 
 async fn advisory(conn: &mut PgConnection, key: &str) -> Result<(), sqlx::Error> {

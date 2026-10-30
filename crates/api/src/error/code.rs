@@ -23,10 +23,13 @@ pub enum ErrorCode {
     RateLimited,
     Unavailable,
     MethodNotAllowed,
+    InvalidToken,
+    SignupClosed,
+    SignupDailyLimit,
 }
 
 impl ErrorCode {
-    pub const ALL: [ErrorCode; 18] = [
+    pub const ALL: [ErrorCode; 21] = [
         Self::Unauthenticated,
         Self::Forbidden,
         Self::NotFound,
@@ -45,6 +48,9 @@ impl ErrorCode {
         Self::RateLimited,
         Self::Unavailable,
         Self::MethodNotAllowed,
+        Self::InvalidToken,
+        Self::SignupClosed,
+        Self::SignupDailyLimit,
     ];
 
     pub fn status(self) -> StatusCode {
@@ -63,9 +69,11 @@ impl ErrorCode {
             | Self::InvalidRequest
             | Self::IdempotencyMismatch
             | Self::TooManyPermissions => StatusCode::UNPROCESSABLE_ENTITY,
-            Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::RateLimited | Self::SignupDailyLimit => StatusCode::TOO_MANY_REQUESTS,
             Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
+            Self::InvalidToken => StatusCode::BAD_REQUEST,
+            Self::SignupClosed => StatusCode::FORBIDDEN,
         }
     }
 
@@ -93,6 +101,11 @@ impl ErrorCode {
             Self::RateLimited => "Bạn thao tác quá nhanh. Vui lòng thử lại sau giây lát.",
             Self::Unavailable => "Máy chủ đang tạm thời gián đoạn. Vui lòng thử lại sau.",
             Self::MethodNotAllowed => "Thao tác này không được hỗ trợ ở địa chỉ này.",
+            Self::InvalidToken => "Liên kết xác minh không đúng, đã được dùng hoặc đã hết hạn.",
+            Self::SignupClosed => "ERPCons Office chưa mở đăng ký tài khoản mới.",
+            Self::SignupDailyLimit => {
+                "Hôm nay ERPCons Office đã nhận đủ lượt đăng ký mới. Vui lòng quay lại sau."
+            }
         }
     }
 
@@ -143,6 +156,9 @@ mod tests {
         assert_eq!(ErrorCode::RateLimited.status(), 429);
         assert_eq!(ErrorCode::Unavailable.status(), 503);
         assert_eq!(ErrorCode::MethodNotAllowed.status(), 405);
+        assert_eq!(ErrorCode::InvalidToken.status(), 400);
+        assert_eq!(ErrorCode::SignupClosed.status(), 403);
+        assert_eq!(ErrorCode::SignupDailyLimit.status(), 429);
     }
 
     #[test]

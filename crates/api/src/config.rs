@@ -1,5 +1,6 @@
 use office_documents::{LinkKey, QuotaConfig};
 use office_mail::MailPolicy;
+use office_signup::SignupPolicy;
 
 use crate::TrustedProxies;
 
@@ -24,6 +25,12 @@ pub struct ApiConfig {
     pub link_rate: RateConfig,
     /// Whether sharing queues notification mail.
     pub mail: MailPolicy,
+    /// Whether `POST /signup` is open, and its daily cap.
+    pub signup: SignupPolicy,
+    /// Per client address, sign-ups submitted.
+    pub signup_rate: RateConfig,
+    /// Per client address, verification tokens tried.
+    pub signup_verify_rate: RateConfig,
     /// `ERPCONS_LINK_KEY`; the server refuses to start without it. `None` only in tests that
     /// never turn a link on.
     pub link_key: Option<LinkKey>,
@@ -67,6 +74,17 @@ impl Default for ApiConfig {
                 per_second: 2.0,
             },
             mail: MailPolicy::default(),
+            signup: SignupPolicy::default(),
+            // A household or office signs up a few people at once; a script gets a handful an hour.
+            signup_rate: RateConfig {
+                burst: 5,
+                per_second: 5.0 / 3600.0,
+            },
+            // Guessing a 256-bit token is hopeless; this only keeps the endpoint from being hammered.
+            signup_verify_rate: RateConfig {
+                burst: 20,
+                per_second: 20.0 / 3600.0,
+            },
             link_key: None,
             max_concurrent_uploads: 3,
             trust_forwarded_for: false,

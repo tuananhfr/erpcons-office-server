@@ -15,6 +15,7 @@ mod pool;
 pub mod purge;
 pub mod quota;
 pub mod share_settings;
+pub mod signups;
 mod state;
 #[cfg(feature = "testing")]
 pub mod testing;

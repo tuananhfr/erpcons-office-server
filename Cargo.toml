@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["apps/server", "crates/api", "crates/db", "crates/documents", "crates/identity", "crates/mail", "crates/storage"]
+members = ["apps/server", "crates/api", "crates/db", "crates/documents", "crates/identity", "crates/mail", "crates/signup", "crates/storage"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,6 +17,7 @@ office-db = { path = "crates/db" }
 office-documents = { path = "crates/documents" }
 office-identity = { path = "crates/identity" }
 office-mail = { path = "crates/mail" }
+office-signup = { path = "crates/signup" }
 office-storage = { path = "crates/storage" }
 
 # Seals link tokens so sharers can copy a link again (RustCrypto; MIT OR Apache-2.0). Nonces come
@@ -25,6 +26,9 @@ aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "al
 async-trait = "0.1.92"
 axum = "0.8.9"
 base64 = "0.23.1"
+# Password hashes handed to PI for sign-ups: `$2y$` bcrypt, which PHP's password_verify reads on every build (MIT).
+# Salts come from ring like every other secret of the server.
+bcrypt = { version = "0.19.3", default-features = false, features = ["alloc", "zeroize"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 hex = "0.4.3"
 # SMTP for share notifications: rustls with ring and the platform verifier, as reqwest (no OpenSSL in the musl build).

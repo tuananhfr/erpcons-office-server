@@ -70,6 +70,40 @@ pub async fn queued_since(db: impl PgExecutor<'_>, secs: i64) -> Result<i64, sql
     .await
 }
 
+/// Mails of `kind` to `to_email` in the last `secs` seconds.
+pub async fn received_of_kind_since(
+    db: impl PgExecutor<'_>,
+    to_email: &str,
+    kind: &str,
+    secs: i64,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM mail_outbox
+         WHERE to_email = $1 AND kind = $2 AND created_at > now() - make_interval(secs => $3)",
+    )
+    .bind(to_email)
+    .bind(kind)
+    .bind(secs as f64)
+    .fetch_one(db)
+    .await
+}
+
+/// Mails of `kind` queued in the last `secs` seconds, to anyone.
+pub async fn queued_of_kind_since(
+    db: impl PgExecutor<'_>,
+    kind: &str,
+    secs: i64,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM mail_outbox
+         WHERE kind = $1 AND created_at > now() - make_interval(secs => $2)",
+    )
+    .bind(kind)
+    .bind(secs as f64)
+    .fetch_one(db)
+    .await
+}
+
 /// No `Debug`: holds an address and a name.
 #[derive(Clone, sqlx::FromRow)]
 pub struct OutboxRow {

@@ -59,7 +59,14 @@ impl io::Write for LogCapture {
 async fn tokens_and_names_stay_out_of_logs_and_audit() {
     let logs = LogCapture::default();
     logs.install_global();
-    let Some(app) = TestApp::spawn_with(|s| s.identity.jwks_min_refresh = Duration::ZERO).await
+    let Some(app) = TestApp::spawn_with(|s| {
+        s.identity.jwks_min_refresh = Duration::ZERO;
+        s.api.signup = office_api::SignupPolicy {
+            enabled: true,
+            daily_cap: 10,
+        };
+    })
+    .await
     else {
         return;
     };
@@ -71,6 +78,7 @@ async fn tokens_and_names_stay_out_of_logs_and_audit() {
     let ok_id = request_id(&ok);
     let (canaries, doc_id) = touch_documents(&app, &token).await;
     let shared = share_and_link(&app, &token, &doc_id).await;
+    let signed_up = sign_up(&app).await;
     assert_eq!(app.get_as("/api/v1/me", rejected).await.status(), 401);
     // A key PI rotated in while it is down cannot be fetched: the check is unavailable.
     app.pi.rotate("2027-04", true);
@@ -81,6 +89,7 @@ async fn tokens_and_names_stay_out_of_logs_and_audit() {
     let mut secrets = vec![token.as_str(), fresh.as_str(), rejected, DEFAULT_NAME];
     secrets.extend(canaries);
     secrets.extend(shared.iter().map(String::as_str));
+    secrets.extend(signed_up.iter().map(String::as_str));
     let text = logs.text();
     assert!(text.contains(&ok_id), "request spans are logged: {text}");
     assert!(
@@ -228,4 +237,38 @@ async fn share_and_link(app: &TestApp, token: &str, doc_id: &str) -> Vec<String>
         link,
         "Canary lời nhắn 6a1f".to_owned(),
     ]
+}
+
+/// Signs up and verifies; returns the name, address, password and verification token.
+async fn sign_up(app: &TestApp) -> Vec<String> {
+    use office_mail::SignupTokens;
+
+    let (name, email, password) = (
+        "Canary đăng ký 71ac",
+        "canary.signup.5f2e@erpcons.test",
+        "canary-mật-khẩu-0d93",
+    );
+    let response = app
+        .post_public(
+            "/api/v1/signup",
+            &json!({ "name": name, "email": email, "password": password }),
+        )
+        .await;
+    assert_eq!(response.status(), 202);
+    let id = sqlx::query_scalar("SELECT id FROM signups")
+        .fetch_one(app.pool())
+        .await
+        .expect("sign-up");
+    let token = app
+        .signups()
+        .issue(id)
+        .await
+        .expect("issue")
+        .expect("pending")
+        .token;
+    let verified = app
+        .post_public("/api/v1/signup/verify", &json!({ "token": token }))
+        .await;
+    assert_eq!(verified.status(), 200);
+    vec![name.into(), email.into(), password.into(), token]
 }

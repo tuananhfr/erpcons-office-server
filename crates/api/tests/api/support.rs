@@ -8,6 +8,7 @@ use office_documents::{
     intake::testing::{ZipEntry, zip},
 };
 use office_identity::{JwtVerifier, JwtVerifierConfig, testing::FakePi};
+use office_signup::Signups;
 use office_storage::FsStorage;
 use reqwest::{Method, RequestBuilder, Response, header::AUTHORIZATION};
 use serde_json::Value;
@@ -63,6 +64,8 @@ impl TestApp {
                 ip_rate: UNLIMITED,
                 actor_rate: UNLIMITED,
                 verify_rate: UNLIMITED,
+                signup_rate: UNLIMITED,
+                signup_verify_rate: UNLIMITED,
                 max_concurrent_uploads: 1000,
                 link_key: Some(office_documents::LinkKey::from_bytes([42; 32])),
                 ..ApiConfig::default()
@@ -105,6 +108,21 @@ impl TestApp {
     /// The document service behind the routes, for running jobs and arming fail points.
     pub fn documents(&self) -> &Arc<Documents> {
         self.state.documents()
+    }
+
+    /// The sign-up service, for issuing the token a verification mail would carry.
+    pub fn signups(&self) -> &Arc<Signups> {
+        self.state.signups()
+    }
+
+    /// A JSON request without a token, as the sign-up pages send it.
+    pub async fn post_public(&self, path: &str, body: &Value) -> Response {
+        self.http
+            .post(self.url(path))
+            .json(body)
+            .send()
+            .await
+            .expect("request")
     }
 
     pub fn store_dir(&self) -> PathBuf {
@@ -388,6 +406,12 @@ pub async fn expect_error(response: Response, status: u16, code: &str, retryable
     let body = error_body(response, status, code, retryable).await;
     assert_eq!(body.as_object().map(|o| o.len()), Some(4), "{body}");
     body
+}
+
+/// An `INVALID_REQUEST` naming the sign-up field at fault.
+pub async fn expect_field_error(response: Response, field: &str) {
+    let body = error_body(response, 422, "INVALID_REQUEST", false).await;
+    assert_eq!(body["field"], field, "{body}");
 }
 
 /// A `VERSION_CONFLICT` body; returns its `latest_version`.

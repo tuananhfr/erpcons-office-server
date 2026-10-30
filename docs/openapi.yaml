@@ -7,7 +7,7 @@ info:
     and their restore, trash, quota, and sharing (people by email, a public view link, "Shared with me"). Served on the
     site's origin under `/api/v1`, so browsers need no CORS.
 
-    **Authentication.** Every operation except `/health` and the two `/link` operations takes the user's PI ID access token as
+    **Authentication.** Every operation except `/health`, the two `/link` and the three `/signup` operations takes the user's PI ID access token as
     `Authorization: Bearer`. The server verifies it locally and resolves it to an actor (`actor_id` = PI `sub`): an
     EdDSA JWT (`typ: JWT`) signed by a key in PI's JWKS, with the configured issuer, an unexpired `exp` (and `nbf`/`iat`
     not in the future), an `aud` naming `pi-platform` and an `azp` among Office's clients (by default
@@ -86,8 +86,22 @@ info:
     (configured, default 2000). Past any of them the sharing still succeeds and appears in "Shared with me", but no
     email is queued, and `mail_skipped` counts them.
 
-    **Logging.** The server never logs titles, folder names, bytes, emails, link tokens or access tokens; audit rows
-    hold ids only (a view through the public link has actor kind `link` and no token).
+    **Sign-up** (no sign-in). Office keeps no accounts: a sign-up becomes a PI ID account. `createSignup` checks the
+    form, stores the address, the name and a `$2y$` bcrypt hash of the password (never the password), and queues a
+    verification email whose link (`/dang-ky/xac-minh/#token=<token>`, valid 48 h) carries a one-time token issued when
+    the email is sent; only its sha256 is stored, and each new email voids the previous link. `verifySignup` uses it
+    once. Only then does a background job send `POST {PI_ISSUER}/api/v1/service/accounts/register` (PI's D515, Office's
+    service key) with the hash, retrying with backoff for up to 7 days, and drops the hash as soon as PI has answered
+    for good. An address that already has a PI ID account keeps its PI ID password and gets an email saying so.
+    Sign-ups never verified are deleted 7 days after their last submission. Every accepted sign-up gets the same 202,
+    whether the address is new, already pending, already verified or past its 3 verification emails a day, so the
+    answer never tells whether an address is known. Limits: per client address (429 `RATE_LIMITED`) and for the whole
+    server per rolling 24 h (configured, default 100; 429 `SIGNUP_DAILY_LIMIT`). Sign-up is open only when the server
+    has SMTP and PI's service key (`getSignupStatus`); otherwise 403 `SIGNUP_CLOSED`.
+
+    **Logging.** The server never logs titles, folder names, bytes, emails, names, passwords, link or verification
+    tokens or access tokens; audit rows hold ids only (a view through the public link has actor kind `link` and no
+    token).
 servers:
   - url: /api/v1
 security:
@@ -101,6 +115,8 @@ tags:
     description: Documents, their versions and the trash.
   - name: sharing
     description: Permissions by email, share settings, the public view link and "Shared with me".
+  - name: signup
+    description: Self sign-up for a free PI ID account, verified by email.
   - name: ops
     description: Operations endpoints.
 paths:
@@ -844,6 +860,108 @@ paths:
               schema: { type: string, contentMediaType: application/octet-stream }
         '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
+  /signup:
+    get:
+      operationId: getSignupStatus
+      tags: [signup]
+      security: []
+      summary: Whether this server takes sign-ups
+      responses:
+        '200':
+          description: Open or closed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [open]
+                properties:
+                  open: { type: boolean }
+    post:
+      operationId: createSignup
+      tags: [signup]
+      security: []
+      summary: Sign up for a free PI ID account; a verification email follows (see **Sign-up**)
+      description: |
+        JSON only (a cross-site form cannot post it without CORS). `name` is trimmed, 1–100 characters without control
+        characters; `email` trimmed and lowercased, ASCII only (PI refuses others); `password` at least 8 characters and
+        at most 72 bytes (bcrypt reads no more), and not the address itself (PI applies no policy to the hash).
+        `website` is a field the page hides from people: when it is filled
+        the answer is the same 202 and nothing happens.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password]
+              properties:
+                name: { type: string, maxLength: 100 }
+                email: { type: string, maxLength: 254 }
+                password: { type: string, minLength: 8 }
+                website: { type: string }
+      responses:
+        '202':
+          description: Accepted; the same for every accepted sign-up.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted]
+                properties:
+                  accepted: { const: true }
+        '403':
+          description: '`SIGNUP_CLOSED`: this server takes no sign-ups.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: '`INVALID_REQUEST`; `field` names the field that broke its rule (absent for a malformed body).'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429':
+          description: '`RATE_LIMITED` (per client address, retryable, `Retry-After`) or `SIGNUP_DAILY_LIMIT` (whole server, not retryable).'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /signup/verify:
+    post:
+      operationId: verifySignup
+      tags: [signup]
+      security: []
+      summary: Verify a sign-up's email with the token of its link
+      description: |
+        The site reads the token from its page's fragment and sends it in the body, so no URL, log or `Referer`
+        carries it. A token works once, within 48 h of its email, and only the latest email's token works. The PI ID
+        account follows within seconds (background job); the person then signs in with PI ID.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        '200':
+          description: Verified.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [verified]
+                properties:
+                  verified: { const: true }
+        '400':
+          description: '`INVALID_TOKEN`: unknown, already used, replaced by a newer email, or expired.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /trash:
     get:
       operationId: listTrash
@@ -1143,9 +1261,16 @@ components:
             - RATE_LIMITED
             - UNAVAILABLE
             - METHOD_NOT_ALLOWED
+            - INVALID_TOKEN
+            - SIGNUP_CLOSED
+            - SIGNUP_DAILY_LIMIT
         message_vi: { type: string }
         request_id: { type: string }
         retryable: { type: boolean }
+        field:
+          type: string
+          enum: [name, email, password]
+          description: '`createSignup` only: the field of an `INVALID_REQUEST`.'
   responses:
     Unauthorized:
       description: '`UNAUTHENTICATED`: missing, expired or rejected token. The client refreshes once, then asks to sign in.'

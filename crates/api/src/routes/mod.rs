@@ -9,6 +9,7 @@ pub(crate) mod public_links;
 mod respond;
 pub(crate) mod share_settings;
 pub(crate) mod shared;
+pub(crate) mod signup;
 pub(crate) mod trash;
 pub(crate) mod upload;
 pub(crate) mod versions;

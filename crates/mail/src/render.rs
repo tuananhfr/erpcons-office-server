@@ -9,7 +9,7 @@ pub struct Rendered {
 }
 
 /// Header values are one line of printable text, whatever PI or a sharer supplied.
-fn one_line(s: &str) -> String {
+pub(crate) fn one_line(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect::<String>()
@@ -18,9 +18,9 @@ fn one_line(s: &str) -> String {
 }
 
 /// A sharer's name in the Subject: long enough to recognize, too short to carry a pitch.
-const SUBJECT_NAME_CHARS: usize = 60;
+pub(crate) const SUBJECT_NAME_CHARS: usize = 60;
 
-fn shortened(s: &str, max: usize) -> String {
+pub(crate) fn shortened(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_owned();
     }
@@ -31,7 +31,7 @@ fn shortened(s: &str, max: usize) -> String {
 
 /// A sharer's message must not become a clickable link in the recipient's mail client: schemes
 /// are written `hxxp`, and dots between letters `[.]`, as security teams quote suspicious URLs.
-fn defanged(s: &str) -> String {
+pub(crate) fn defanged(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len() + 8);
     let mut i = 0;

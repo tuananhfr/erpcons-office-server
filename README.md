@@ -11,7 +11,8 @@ site's own origin (`office.erpcons.vn`, Apache reverse proxy to `127.0.0.1:8710`
   jobs), plus phase 2 milestone 1 (old versions' bytes, restoring a version, deleting an old version: owner only, bytes
   freed when no other version uses them) and the server part of milestone 2
   (sharing by email with roles, pending invitations, share settings, the public view link, "Shared with me",
-  "shared with you" mail through an outbox).
+  "shared with you" mail through an outbox), and self sign-up (`/signup`: verified by mail, then the PI ID account
+  is created through PI's `register`, office-licensing plan part D).
 - Known limit: `Idempotency-Key` stores the response after the create commits. If the server dies in between, the
   key's claim lapses after 60 s and a repeat creates a second item instead of replaying the first.
 
@@ -22,7 +23,8 @@ site's own origin (`office.erpcons.vn`, Apache reverse proxy to `127.0.0.1:8710`
 | `apps/server` | Binary: configuration from the environment, start-up (migrations), background jobs, graceful shutdown |
 | `crates/api` | axum router and thin handlers, `Error` body (also for framework rejections), request id, bearer auth (sampled denial audit), rate limits (per address with IPv6 by /64, per actor, token checks, concurrent uploads), body limits (64 KiB JSON), `Idempotency-Key`, tracing |
 | `crates/documents` | Document service: `authorize` (deny by default; roles owner, editor, commenter, viewer, link, read from the database on every request), folders and documents, durable save (bytes of a failed request are removed at once), version restore, quota (charged to the document's owner), sharing (permissions by email, pending invitations, share settings, link tokens stored as sha256, "Shared with me"), intake checks (signature, ZIP bomb), purge on request, purge, orphan and audit retention jobs, blank templates in `templates/` |
-| `crates/mail` | "Shared with you" mail: the notice queued in `mail_outbox`, its Vietnamese text, the SMTP transport (lettre, rustls) and the outbox job (retries with backoff for up to 24 h) |
+| `crates/mail` | "Shared with you" mail: the notice queued in `mail_outbox`, its Vietnamese text, the SMTP transport (lettre, rustls) and the outbox job (retries with backoff for up to 24 h); also the two sign-up mails, whose verification token is issued by the sign-up service when the mail is sent |
+| `crates/signup` | Self sign-up: form rules (shared with the site's `src/lib/signup/rules.ts`), `$2y$` bcrypt hash of the password, one-time verification tokens (sha256 only, 48 h, the latest mail's only), caps (3 mails per address, a server-wide daily cap), the job that sends verified sign-ups to PI's `POST /api/v1/service/accounts/register` with backoff for up to 7 days and then drops the hash, and the expiry of unverified sign-ups after 7 days |
 | `crates/identity` | `IdentityVerifier`; `JwtVerifier` checks PI ID access tokens locally (EdDSA JWT: signature against PI's JWKS, `alg`, `typ`, `iss`, `exp`/`nbf`/`iat`, `aud`, `azp`, `sub`), caches verdicts 60 s (never past `exp`) and asks PI's `/id/userinfo` for the display name and the verified email once per actor and hour; `testing::FakePi` stands in for PI in tests |
 | `crates/storage` | `StorageAdapter`; `FsStorage` stores objects by sha256 (temp file, fsync, verify, rename) |
 | `crates/db` | sqlx Postgres pool, migrations in `crates/db/migrations/` (run at start-up), queries |
@@ -63,6 +65,10 @@ site's own origin (`office.erpcons.vn`, Apache reverse proxy to `127.0.0.1:8710`
 | `ERPCONS_MAIL_INCLUDE_TITLE` | `false` | Put the document title in the mail |
 | `ERPCONS_MAIL_DAILY_CAP` | `100` | Invite mails one account may cause per rolling 24 h; past it sharing still succeeds without mail (`mail_skipped`) |
 | `ERPCONS_MAIL_GLOBAL_DAILY_CAP` | `2000` | Invite mails the whole server queues per rolling 24 h; one address also receives at most 10 a day (fixed) |
+| `ERPCONS_PI_SERVICE_KEY` | unset | PI's service key for `erpconsoffice` (`X-PI-Service-Key`); with SMTP it opens self sign-up and the job that registers verified sign-ups at `{PI_ISSUER}/api/v1/service/accounts/register`. Unset (or no SMTP), `POST /signup` answers 403 `SIGNUP_CLOSED`. Never logged |
+| `ERPCONS_SIGNUP_DAILY_CAP` | `100` | Sign-ups (verification mails) the whole server accepts per rolling 24 h; past it 429 `SIGNUP_DAILY_LIMIT`. One address also gets at most 3 verification mails a day (fixed, silently) |
+| `ERPCONS_RATE_SIGNUP_BURST` / `ERPCONS_RATE_SIGNUP_PER_SEC` | `5` / `5/3600` | Per client address, sign-ups submitted |
+| `ERPCONS_RATE_SIGNUP_VERIFY_BURST` / `ERPCONS_RATE_SIGNUP_VERIFY_PER_SEC` | `20` / `20/3600` | Per client address, verification tokens tried |
 | `RUST_LOG` | `info,sqlx=warn` | Log filter |
 
 ## Tests

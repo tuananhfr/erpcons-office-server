@@ -8,6 +8,7 @@ use office_documents::{
 };
 use office_identity::JwtVerifierConfig;
 use office_mail::{MailConfig, SmtpConfig, TlsMode};
+use office_signup::{PiRegistrarConfig, ServiceKey, SignupPolicy};
 
 use crate::jobs::JobsConfig;
 
@@ -32,6 +33,9 @@ pub(crate) struct ServerConfig {
     pub jobs: JobsConfig,
     /// `None` without `ERPCONS_SMTP_HOST`: no mail is queued or sent.
     pub mail: Option<MailConfig>,
+    /// Set when sign-up is open (`ERPCONS_PI_SERVICE_KEY` and SMTP): the job that registers
+    /// verified sign-ups at PI.
+    pub pi_registrar: Option<PiRegistrarConfig>,
 }
 
 impl ServerConfig {
@@ -96,6 +100,24 @@ impl ServerConfig {
         // sealed without it.
         let link_key = LinkKey::from_base64(&vars.required("ERPCONS_LINK_KEY")?)
             .map_err(|_| ConfigError::InvalidLinkKey)?;
+        // Both or sign-up stays closed: the link must reach the address, the account must reach PI.
+        let pi_registrar = match (vars.get("ERPCONS_PI_SERVICE_KEY"), &mail) {
+            (Some(key), Some(_)) => Some(PiRegistrarConfig {
+                issuer: identity.issuer.clone(),
+                service_key: ServiceKey::new(key.trim()),
+                timeout: Duration::from_secs(10),
+            }),
+            _ => None,
+        };
+        let signup_cap = vars.positive(
+            "ERPCONS_SIGNUP_DAILY_CAP",
+            office_signup::DEFAULT_DAILY_CAP as usize,
+        )?;
+        let signup = SignupPolicy {
+            enabled: pi_registrar.is_some(),
+            daily_cap: u32::try_from(signup_cap)
+                .map_err(|_| ConfigError::Invalid("ERPCONS_SIGNUP_DAILY_CAP"))?,
+        };
         let api = ApiConfig {
             quota,
             max_body_bytes,
@@ -119,6 +141,17 @@ impl ServerConfig {
                 "ERPCONS_RATE_LINK_PER_SEC",
                 defaults.link_rate,
             )?,
+            signup_rate: vars.rate(
+                "ERPCONS_RATE_SIGNUP_BURST",
+                "ERPCONS_RATE_SIGNUP_PER_SEC",
+                defaults.signup_rate,
+            )?,
+            signup_verify_rate: vars.rate(
+                "ERPCONS_RATE_SIGNUP_VERIFY_BURST",
+                "ERPCONS_RATE_SIGNUP_VERIFY_PER_SEC",
+                defaults.signup_verify_rate,
+            )?,
+            signup,
             mail: mail.as_ref().map(MailConfig::policy).unwrap_or_default(),
             link_key: Some(link_key),
             max_concurrent_uploads: vars.positive(
@@ -140,6 +173,7 @@ impl ServerConfig {
             api,
             jobs,
             mail,
+            pi_registrar,
         })
     }
 }
@@ -352,6 +386,10 @@ mod tests {
         assert_eq!(c.api.link_rate, ApiConfig::default().link_rate);
         assert!(c.mail.is_none(), "no SMTP host, no mail");
         assert!(!c.api.mail.enabled);
+        assert!(!c.api.signup.enabled, "sign-up is closed by default");
+        assert!(c.pi_registrar.is_none());
+        assert_eq!(c.api.signup.daily_cap, 100);
+        assert_eq!(c.api.signup_rate, ApiConfig::default().signup_rate);
         assert_eq!(
             c.api.link_key,
             Some(LinkKey::from_base64(DEV_LINK_KEY).expect("dev key"))
@@ -378,6 +416,28 @@ mod tests {
         assert!(!c.api.mail.include_title);
         assert_eq!(c.api.mail.daily_cap, 100);
         assert_eq!(c.api.mail.global_daily_cap, 2000);
+    }
+
+    #[test]
+    fn sign_up_opens_only_with_smtp_and_the_service_key() {
+        let key = ("ERPCONS_PI_SERVICE_KEY", "office-service-key");
+        let without_smtp = load(&[key]).expect("config");
+        assert!(!without_smtp.api.signup.enabled);
+        assert!(without_smtp.pi_registrar.is_none());
+        let without_key = load(&SMTP).expect("config");
+        assert!(!without_key.api.signup.enabled);
+        let mut vars = SMTP.to_vec();
+        vars.extend([key, ("ERPCONS_SIGNUP_DAILY_CAP", "25")]);
+        let open = load(&vars).expect("config");
+        assert!(open.api.signup.enabled);
+        assert_eq!(open.api.signup.daily_cap, 25);
+        let registrar = open.pi_registrar.expect("registrar");
+        assert_eq!(registrar.issuer, "https://id.pi.example");
+        assert_eq!(registrar.service_key, ServiceKey::new("office-service-key"));
+        assert_eq!(
+            load(&[("ERPCONS_SIGNUP_DAILY_CAP", "0")]).err(),
+            Some(ConfigError::Invalid("ERPCONS_SIGNUP_DAILY_CAP"))
+        );
     }
 
     #[test]

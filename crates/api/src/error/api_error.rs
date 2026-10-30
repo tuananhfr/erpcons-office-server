@@ -7,6 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use office_documents::DocError;
+use office_signup::{Field, SignupError};
 use serde::Serialize;
 use tracing::error;
 
@@ -19,6 +20,7 @@ pub struct ApiError {
     code: ErrorCode,
     retry_after_secs: Option<u64>,
     latest_version: Option<i32>,
+    field: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -29,6 +31,8 @@ struct ErrorBody<'a> {
     retryable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     latest_version: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    field: Option<&'static str>,
 }
 
 impl ApiError {
@@ -37,6 +41,7 @@ impl ApiError {
             code,
             retry_after_secs: None,
             latest_version: None,
+            field: None,
         }
     }
 
@@ -56,6 +61,14 @@ impl ApiError {
         Self {
             latest_version: Some(latest_version),
             ..Self::new(ErrorCode::VersionConflict)
+        }
+    }
+
+    /// 422 `INVALID_REQUEST` naming the sign-up field that broke a rule.
+    pub fn invalid_field(field: &'static str) -> Self {
+        Self {
+            field: Some(field),
+            ..Self::new(ErrorCode::InvalidRequest)
         }
     }
 
@@ -102,6 +115,22 @@ impl From<DocError> for ApiError {
     }
 }
 
+impl From<SignupError> for ApiError {
+    fn from(err: SignupError) -> Self {
+        match err {
+            SignupError::Closed => ErrorCode::SignupClosed.into(),
+            SignupError::Invalid(field) => Self::invalid_field(match field {
+                Field::Name => "name",
+                Field::Email => "email",
+                Field::Password => "password",
+            }),
+            SignupError::DailyLimit => ErrorCode::SignupDailyLimit.into(),
+            SignupError::InvalidToken => ErrorCode::InvalidToken.into(),
+            SignupError::Unavailable => ErrorCode::Unavailable.into(),
+        }
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let request_id = request_id::current();
@@ -111,6 +140,7 @@ impl IntoResponse for ApiError {
             request_id: request_id.as_ref().map_or("", |id| id.as_str()),
             retryable: self.code.retryable(),
             latest_version: self.latest_version,
+            field: self.field,
         };
         let mut response = (self.code.status(), Json(body)).into_response();
         let headers = response.headers_mut();

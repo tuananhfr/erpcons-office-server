@@ -3,6 +3,7 @@ use std::sync::Arc;
 use office_db::PgPool;
 use office_documents::Documents;
 use office_identity::IdentityVerifier;
+use office_signup::Signups;
 use office_storage::StorageAdapter;
 
 use crate::{
@@ -34,6 +35,9 @@ pub struct AppState {
     pub(crate) upload_slots: Arc<ConcurrencyLimiter>,
     /// Public view links, per client.
     pub(crate) link_limiter: Arc<KeyedLimiter<ClientKey>>,
+    pub(crate) signups: Arc<Signups>,
+    pub(crate) signup_limiter: Arc<KeyedLimiter<ClientKey>>,
+    pub(crate) signup_verify_limiter: Arc<KeyedLimiter<ClientKey>>,
 }
 
 impl AppState {
@@ -48,6 +52,7 @@ impl AppState {
                 .with_mail(config.mail)
                 .with_link_key(config.link_key.clone()),
         );
+        let signups = Arc::new(Signups::new(db.clone(), config.signup));
         Self {
             db,
             storage,
@@ -59,6 +64,9 @@ impl AppState {
             denial_audit: Arc::new(KeyedLimiter::new(DENIAL_AUDIT_RATE)),
             upload_slots: Arc::new(ConcurrencyLimiter::new(config.max_concurrent_uploads)),
             link_limiter: Arc::new(KeyedLimiter::new(config.link_rate)),
+            signups,
+            signup_limiter: Arc::new(KeyedLimiter::new(config.signup_rate)),
+            signup_verify_limiter: Arc::new(KeyedLimiter::new(config.signup_verify_rate)),
             config: Arc::new(config),
         }
     }
@@ -66,5 +74,10 @@ impl AppState {
     /// The document service behind the routes; the server also runs its jobs.
     pub fn documents(&self) -> &Arc<Documents> {
         &self.docs
+    }
+
+    /// The sign-up service; the server's jobs send its mails and hand its accounts to PI.
+    pub fn signups(&self) -> &Arc<Signups> {
+        &self.signups
     }
 }

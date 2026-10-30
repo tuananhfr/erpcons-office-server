@@ -1,10 +1,13 @@
 //! The outbox job against a real Postgres (`TEST_DATABASE_URL`) and a fake SMTP server on loopback.
 use std::sync::{Arc, Mutex, PoisonError};
 
+use async_trait::async_trait;
+
 use base64::{Engine, engine::general_purpose::STANDARD};
 use office_db::{mail_outbox, testing::TestDb};
 use office_mail::{
-    KIND_SHARED, MailConfig, OutboxConfig, SharedNotice, SmtpConfig, SmtpTransport, TlsMode,
+    IssuedToken, KIND_SHARED, KIND_SIGNUP_EXISTING, KIND_SIGNUP_VERIFY, MailConfig, OutboxConfig,
+    SendError, SharedNotice, SignupNotice, SignupTokens, SmtpConfig, SmtpTransport, TlsMode,
     run_outbox,
 };
 use tokio::{
@@ -198,19 +201,19 @@ async fn a_temporary_refusal_is_retried_then_sent() {
     queue(&db, document_id).await;
     let config = OutboxConfig::default();
 
-    let first = run_outbox(db.pool(), &transport, ORIGIN, &config)
+    let first = run_outbox(db.pool(), &transport, ORIGIN, None, &config)
         .await
         .expect("first round");
     assert_eq!((first.sent, first.retried, first.failed), (0, 1, 0));
     assert_eq!(row(&db).await, (1, false, false));
     // Backed off: a second round right away sends nothing.
-    let waiting = run_outbox(db.pool(), &transport, ORIGIN, &config)
+    let waiting = run_outbox(db.pool(), &transport, ORIGIN, None, &config)
         .await
         .expect("waiting round");
     assert_eq!(waiting.sent + waiting.retried, 0);
 
     make_due(&db).await;
-    let second = run_outbox(db.pool(), &transport, ORIGIN, &config)
+    let second = run_outbox(db.pool(), &transport, ORIGIN, None, &config)
         .await
         .expect("second round");
     assert_eq!((second.sent, second.retried, second.failed), (1, 0, 0));
@@ -237,7 +240,7 @@ async fn a_permanent_refusal_or_a_day_of_failures_gives_up() {
     let transport = transport(port);
     let config = OutboxConfig::default();
     queue(&db, Uuid::now_v7()).await;
-    let report = run_outbox(db.pool(), &transport, ORIGIN, &config)
+    let report = run_outbox(db.pool(), &transport, ORIGIN, None, &config)
         .await
         .expect("round");
     assert_eq!((report.sent, report.retried, report.failed), (0, 0, 1));
@@ -252,7 +255,7 @@ async fn a_permanent_refusal_or_a_day_of_failures_gives_up() {
         .execute(db.pool())
         .await
         .expect("age");
-    let report = run_outbox(db.pool(), &transport, ORIGIN, &config)
+    let report = run_outbox(db.pool(), &transport, ORIGIN, None, &config)
         .await
         .expect("round");
     assert_eq!((report.sent, report.retried, report.failed), (0, 0, 1));
@@ -262,7 +265,7 @@ async fn a_permanent_refusal_or_a_day_of_failures_gives_up() {
         .execute(db.pool())
         .await
         .expect("age");
-    let report = run_outbox(db.pool(), &transport, ORIGIN, &config)
+    let report = run_outbox(db.pool(), &transport, ORIGIN, None, &config)
         .await
         .expect("round");
     assert_eq!(report.deleted, 1);
@@ -273,4 +276,106 @@ async fn a_permanent_refusal_or_a_day_of_failures_gives_up() {
             .expect("count"),
         0
     );
+}
+
+/// Issues `token` for `live` only, as the sign-up service does for a pending sign-up.
+struct Tokens {
+    live: Uuid,
+    issued: Mutex<u32>,
+}
+
+#[async_trait]
+impl SignupTokens for Tokens {
+    async fn issue(&self, signup_id: Uuid) -> Result<Option<IssuedToken>, SendError> {
+        if signup_id != self.live {
+            return Ok(None);
+        }
+        *self.issued.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+        Ok(Some(IssuedToken {
+            display_name: "Lê Minh Chí".to_owned(),
+            token: "tok-0123456789".to_owned(),
+        }))
+    }
+}
+
+async fn queue_kind(db: &TestDb, kind: &str, to: &str, signup_id: Uuid) {
+    let mut conn = db.pool().acquire().await.expect("connection");
+    let payload = SignupNotice { signup_id }.to_json();
+    let mail = mail_outbox::NewMail {
+        kind,
+        sender_id: None,
+        to_email: to,
+        payload: &payload,
+    };
+    mail_outbox::enqueue(&mut conn, &mail)
+        .await
+        .expect("enqueue");
+}
+
+#[tokio::test]
+async fn sign_up_mails_get_their_token_when_sent_and_stale_ones_are_dropped() {
+    let Some(db) = TestDb::create().await else {
+        return;
+    };
+    let (smtp, port) = FakeSmtp::start(vec![]).await;
+    let transport = transport(port);
+    let live = Uuid::now_v7();
+    let tokens = Tokens {
+        live,
+        issued: Mutex::new(0),
+    };
+    queue_kind(&db, KIND_SIGNUP_VERIFY, "chi@erpcons.test", live).await;
+    queue_kind(&db, KIND_SIGNUP_VERIFY, "old@erpcons.test", Uuid::now_v7()).await;
+    queue_kind(&db, KIND_SIGNUP_EXISTING, "an@erpcons.test", Uuid::now_v7()).await;
+
+    // Without a token issuer a verification mail cannot be written: given up, never sent bare.
+    let none = run_outbox(
+        db.pool(),
+        &transport,
+        ORIGIN,
+        None,
+        &OutboxConfig::default(),
+    )
+    .await
+    .expect("round");
+    assert_eq!((none.sent, none.failed), (1, 2));
+    sqlx::query("UPDATE mail_outbox SET failed_at = NULL, next_at = now() WHERE kind = $1")
+        .bind(KIND_SIGNUP_VERIFY)
+        .execute(db.pool())
+        .await
+        .expect("reset");
+
+    let report = run_outbox(
+        db.pool(),
+        &transport,
+        ORIGIN,
+        Some(&tokens),
+        &OutboxConfig::default(),
+    )
+    .await
+    .expect("round");
+    assert_eq!((report.sent, report.dropped, report.failed), (1, 1, 0));
+    assert_eq!(*tokens.issued.lock().expect("count"), 1);
+    let texts: Vec<String> = smtp.received().iter().map(|m| decoded(m)).collect();
+    assert_eq!(texts.len(), 2);
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("Đã có tài khoản PI ID") || t.contains("đã có tài khoản PI ID")),
+        "{texts:?}"
+    );
+    let verify = texts
+        .iter()
+        .find(|t| t.contains("Xin chào Lê Minh Chí"))
+        .expect("verification mail");
+    assert!(
+        verify.contains(&format!("{ORIGIN}/dang-ky/xac-minh/#token=tok-0123456789")),
+        "{verify}"
+    );
+    // The outbox row never held the token.
+    let payloads: Vec<String> = sqlx::query_scalar("SELECT payload::text FROM mail_outbox")
+        .fetch_all(db.pool())
+        .await
+        .expect("payloads");
+    assert!(payloads.iter().all(|p| !p.contains("tok-")), "{payloads:?}");
 }

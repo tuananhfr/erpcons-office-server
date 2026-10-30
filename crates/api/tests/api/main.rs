@@ -17,6 +17,7 @@ mod purge;
 mod rejections;
 mod share_caps;
 mod sharing;
+mod signup;
 mod support;
 mod verified_emails;
 mod version_delete;

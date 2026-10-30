@@ -12,6 +12,7 @@ office-db.workspace = true
 office-documents.workspace = true
 office-identity.workspace = true
 office-mail.workspace = true
+office-signup.workspace = true
 office-storage.workspace = true
 axum.workspace = true
 thiserror.workspace = true

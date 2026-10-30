@@ -28,6 +28,10 @@ is `docs/openapi.yaml`. The approved plans are `erpcons-workspace/tmp/briefs/off
 - **Emails and link tokens are PII/secrets**: emails live only in `actor_emails`, `document_acl` and `mail_outbox`;
   link tokens as sha256 (lookups) plus a copy sealed with AES-256-GCM under `ERPCONS_LINK_KEY` (shown to sharers
   again), never in the clear. Neither reaches logs or audit rows.
+- **Sign-up secrets**: a password exists on the server only as the `$2y$` bcrypt hash in `signups`, dropped (a
+  check constraint) once PI answered for good; a verification token only as sha256, issued by
+  `Signups::issue` when its mail is sent, never in `mail_outbox`. An unverified address never reaches PI, and every
+  accepted `POST /signup` gets the same answer whatever the address's state.
 - **Durable write order** (plan §4): temp file, fsync, verify sha256, rename, DB transaction (version +
   `current_version_id` + `etag`), commit, then 200. Never report success before the commit. A request that fails
   after its put calls `Documents::discard` (deletes the bytes under `locks::object` unless deduplicated or referenced);

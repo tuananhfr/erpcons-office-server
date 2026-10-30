@@ -9,13 +9,14 @@ use std::{error::Error, net::SocketAddr, process::ExitCode, sync::Arc};
 
 use office_identity::JwtVerifier;
 use office_mail::SmtpTransport;
+use office_signup::HttpPiRegistrar;
 use office_storage::FsStorage;
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
 use crate::{
     config::ServerConfig,
-    jobs::{Jobs, MailJob},
+    jobs::{Jobs, MailJob, SignupJob},
 };
 
 #[tokio::main]
@@ -36,17 +37,35 @@ async fn run() -> Result<(), Box<dyn Error>> {
     office_db::migrate(&db).await?;
     let storage = Arc::new(FsStorage::open(&config.data_dir).await?);
     let identity = Arc::new(JwtVerifier::new(config.identity)?);
+    let state = office_api::AppState::new(db.clone(), storage, identity, config.api);
     let mail = match &config.mail {
         Some(mail) => Some(MailJob {
             db: db.clone(),
             transport: Arc::new(SmtpTransport::new(mail)?),
             public_origin: mail.public_origin.clone(),
+            signups: state.signups().clone(),
         }),
         None => None,
     };
-    info!(mail = mail.is_some(), "configured");
-    let state = office_api::AppState::new(db.clone(), storage, identity, config.api);
-    let jobs = Jobs::spawn(state.documents(), &config.jobs, mail);
+    let signup = match config.pi_registrar {
+        Some(registrar) => Some(SignupJob {
+            signups: state.signups().clone(),
+            registrar: Arc::new(HttpPiRegistrar::new(registrar)?),
+        }),
+        None => None,
+    };
+    info!(
+        mail = mail.is_some(),
+        signup = signup.is_some(),
+        "configured"
+    );
+    let jobs = Jobs::spawn(
+        state.documents(),
+        state.signups(),
+        &config.jobs,
+        mail,
+        signup,
+    );
     let app = office_api::router(state).into_make_service_with_connect_info::<SocketAddr>();
     let listener = TcpListener::bind(config.bind).await?;
     info!(address = %config.bind, "listening");
