@@ -64,6 +64,7 @@ impl TestApp {
                 actor_rate: UNLIMITED,
                 verify_rate: UNLIMITED,
                 max_concurrent_uploads: 1000,
+                link_key: Some(office_documents::LinkKey::from_bytes([42; 32])),
                 ..ApiConfig::default()
             },
             identity: JwtVerifierConfig::new(pi.issuer()),
@@ -126,6 +127,24 @@ impl TestApp {
 
     pub async fn get(&self, path: &str) -> Response {
         self.http.get(self.url(path)).send().await.expect("request")
+    }
+
+    /// `GET /link` with a public link token, as the site sends it.
+    pub async fn open_link(&self, link: &str) -> Response {
+        self.link_get("/api/v1/link", link).await
+    }
+
+    pub async fn open_link_content(&self, link: &str) -> Response {
+        self.link_get("/api/v1/link/content", link).await
+    }
+
+    async fn link_get(&self, path: &str, link: &str) -> Response {
+        self.http
+            .get(self.url(path))
+            .header("x-link-token", link)
+            .send()
+            .await
+            .expect("request")
     }
 
     pub async fn get_as(&self, path: &str, token: &str) -> Response {

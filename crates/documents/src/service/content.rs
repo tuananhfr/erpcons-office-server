@@ -1,7 +1,7 @@
 //! Durable writes (plan §4): the bytes are stored first (temp file, fsync, sha256, rename), then
 //! one transaction records them; only its commit makes a version exist. Bytes stored by a request
 //! that fails later are discarded ([`Documents::discard`]); the orphan sweep removes what a crash
-//! leaves.
+//! leaves. A save by an editor counts against the owner's quota.
 use office_db::{
     PgConnection, documents, locks, objects, quota,
     versions::{self, NewVersion},
@@ -11,9 +11,8 @@ use tracing::error;
 use uuid::Uuid;
 
 use super::{
-    Caller, Documents, Staged,
+    Caller, Documents, Staged, access,
     audit::{self, Subject},
-    documents::{active_document, owned_document},
     folders::active_folder,
 };
 use crate::{Action, DocError, Document, FailPoint, Format, Name, templates};
@@ -26,7 +25,7 @@ pub struct CreateDocument {
     pub staged: Staged,
 }
 
-/// The current bytes of a document.
+/// The bytes of a document version.
 pub struct Content {
     pub reader: ObjectReader,
     pub size: u64,
@@ -35,7 +34,7 @@ pub struct Content {
 }
 
 impl Documents {
-    /// Creates a document whose version 1 is `staged`.
+    /// Creates a document of the caller whose version 1 is `staged`.
     pub async fn create_document(
         &self,
         c: &Caller<'_>,
@@ -55,19 +54,19 @@ impl Documents {
         let staged = &request.staged;
         let title = title_of(&request)?;
         let mut tx = self.begin().await?;
-        self.touch_actor(&mut tx, c).await?;
+        self.touch_actor(&mut tx, c, c.actor_id()).await?;
         if let Some(folder) = request.folder_id {
-            locks::tree(&mut tx, c.owner())
+            locks::tree(&mut tx, c.actor_id())
                 .await
                 .map_err(DocError::db)?;
             active_folder(&mut *tx, c, folder, Action::Write).await?;
         }
-        let object_id = self.claim_object(&mut tx, c.owner(), staged).await?;
+        let object_id = self.claim_object(&mut tx, c.actor_id(), staged).await?;
         let id = Uuid::now_v7();
         let format = staged.format;
         let draft = documents::NewDocument {
             id,
-            owner_id: c.owner(),
+            owner_id: c.actor_id(),
             folder_id: request.folder_id,
             title: title.as_str(),
             kind: format.kind().as_str(),
@@ -76,12 +75,13 @@ impl Documents {
         documents::insert_draft(&mut *tx, &draft)
             .await
             .map_err(DocError::db)?;
-        record_version(&mut tx, c, id, 1, object_id, staged).await?;
+        let sha = staged.sha256.to_hex();
+        record_version(&mut tx, c, id, 1, object_id, &sha, size_i64(staged.size)?).await?;
         audit::success(&mut tx, c, "document.create", Subject::Document(id)).await?;
         self.commit(tx).await?;
-        owned_document(&self.db, c, id, Action::Read)
+        access::load(&self.db, c, id, Action::Read)
             .await?
-            .try_into()
+            .document()
     }
 
     /// Saves a new version based on the one whose etag is in `if_match`. 200 means durable; on any
@@ -106,14 +106,16 @@ impl Documents {
         if_match: &[String],
         source: ObjectReader,
     ) -> Result<Document, DocError> {
-        let current = active_document(&self.db, c, id, Action::Write).await?;
-        if !if_match.contains(&current.etag) {
+        // Checked before any byte is stored, so someone who may not write cannot fill the disk.
+        let current = access::load_active(&self.db, c, id, Action::Write).await?;
+        if !if_match.contains(&current.row.etag) {
             return self.replay_or_conflict(c, current, if_match, source).await;
         }
-        self.check_room(c).await?;
-        let format = Format::from_mime(&current.mime).ok_or(DocError::Unavailable)?;
+        let owner_id = current.owner_id().to_owned();
+        self.check_room(&owner_id).await?;
+        let format = Format::from_mime(&current.row.mime).ok_or(DocError::Unavailable)?;
         let staged = self.stage(format, source).await?;
-        let result = self.record_save(c, id, if_match, &staged).await;
+        let result = self.record_save(c, id, &owner_id, if_match, &staged).await;
         if result.is_err() {
             self.discard(&staged).await;
         }
@@ -124,61 +126,73 @@ impl Documents {
         &self,
         c: &Caller<'_>,
         id: Uuid,
+        owner_id: &str,
         if_match: &[String],
         staged: &Staged,
     ) -> Result<Document, DocError> {
         let mut tx = self.begin().await?;
-        self.touch_actor(&mut tx, c).await?;
-        let object_id = self.claim_object(&mut tx, c.owner(), staged).await?;
-        // The row lock makes this check and the update below one step: of two saves on the same
-        // base, the second waits here and then sees the first one's etag.
-        let target = documents::lock_for_save(&mut tx, id)
-            .await
-            .map_err(DocError::db)?
-            .ok_or(DocError::NotFound)?;
-        crate::authorize(
-            c.actor,
-            crate::Resource::Document {
-                owner_id: &target.owner_id,
-            },
-            Action::Write,
-        )?;
-        if target.state != office_db::ItemState::Active {
-            return Err(DocError::NotFound);
-        }
-        if !if_match.contains(&target.etag) {
+        self.touch_actor(&mut tx, c, owner_id).await?;
+        let object_id = self.claim_object(&mut tx, owner_id, staged).await?;
+        // The row lock makes the access check, the etag check and the update below one step: of
+        // two saves on the same base the second waits here and then sees the first one's etag, and
+        // a permission removed meanwhile refuses this save.
+        let target = access::load_for_update(&mut tx, c, id, Action::Write).await?;
+        if !if_match.contains(&target.row.etag) {
             return Err(DocError::VersionConflict {
-                latest_version: target.version,
+                latest_version: target.row.version,
             });
         }
-        record_version(&mut tx, c, id, target.version + 1, object_id, staged).await?;
+        let sha = staged.sha256.to_hex();
+        let next = target.row.version + 1;
+        record_version(
+            &mut tx,
+            c,
+            id,
+            next,
+            object_id,
+            &sha,
+            size_i64(staged.size)?,
+        )
+        .await?;
         audit::success(&mut tx, c, "document.save", Subject::Document(id)).await?;
         self.commit(tx).await?;
-        owned_document(&self.db, c, id, Action::Read)
+        access::load(&self.db, c, id, Action::Read)
             .await?
-            .try_into()
+            .document()
     }
 
     pub async fn open_content(&self, c: &Caller<'_>, id: Uuid) -> Result<Content, DocError> {
-        owned_document(&self.db, c, id, Action::Read).await?;
+        access::load(&self.db, c, id, Action::Read).await?;
+        self.current_content(id).await
+    }
+
+    /// The current bytes of `id`, which the caller was allowed to read.
+    pub(super) async fn current_content(&self, id: Uuid) -> Result<Content, DocError> {
         let content = documents::content_ref(&self.db, id)
             .await
             .map_err(DocError::db)?
             .ok_or(DocError::NotFound)?;
-        let reader = match self.storage.get(&ObjectKey::new(content.opaque_key)).await {
-            Ok(reader) => reader,
-            Err(StorageError::NotFound) => {
-                error!(document_id = %id, "bytes of the current version are missing");
-                return Err(DocError::Unavailable);
-            }
-            Err(e) => return Err(DocError::storage(e)),
-        };
         Ok(Content {
-            reader,
+            reader: self.open_object(id, content.opaque_key).await?,
             size: u64::try_from(content.size).unwrap_or(0),
             version: content.version,
             etag: content.etag,
         })
+    }
+
+    pub(super) async fn open_object(
+        &self,
+        id: Uuid,
+        opaque_key: String,
+    ) -> Result<ObjectReader, DocError> {
+        match self.storage.get(&ObjectKey::new(opaque_key)).await {
+            Ok(reader) => Ok(reader),
+            Err(StorageError::NotFound) => {
+                error!(document_id = %id, "bytes of a version are missing");
+                Err(DocError::Unavailable)
+            }
+            Err(e) => Err(DocError::storage(e)),
+        }
     }
 
     /// Takes the object's lock, checks the bytes are still there (a sweep may have removed them
@@ -191,11 +205,7 @@ impl Documents {
     ) -> Result<Uuid, DocError> {
         let sha = staged.sha256.to_hex();
         locks::object(conn, &sha).await.map_err(DocError::db)?;
-        match self.storage.head(&staged.key).await {
-            Ok(Some(_)) => {}
-            Ok(None) => return Err(DocError::Unavailable),
-            Err(e) => return Err(DocError::storage(e)),
-        }
+        self.require_stored(&staged.key).await?;
         let used = quota::used_bytes(&mut *conn, owner_id)
             .await
             .map_err(DocError::db)?;
@@ -210,7 +220,16 @@ impl Documents {
             .map_err(DocError::db)
     }
 
-    async fn commit(
+    /// The bytes behind `key` still exist; call with the object's lock held.
+    pub(super) async fn require_stored(&self, key: &ObjectKey) -> Result<(), DocError> {
+        match self.storage.head(key).await {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(DocError::Unavailable),
+            Err(e) => Err(DocError::storage(e)),
+        }
+    }
+
+    pub(super) async fn commit(
         &self,
         tx: office_db::Transaction<'static, office_db::Postgres>,
     ) -> Result<(), DocError> {
@@ -223,25 +242,25 @@ impl Documents {
     }
 }
 
-/// Inserts version `seq` and makes it current with a fresh etag.
-async fn record_version(
+/// Inserts version `seq`, written by the caller, and makes it current with a fresh etag.
+pub(super) async fn record_version(
     conn: &mut PgConnection,
     c: &Caller<'_>,
     document_id: Uuid,
     seq: i32,
     object_id: Uuid,
-    staged: &Staged,
+    sha256: &str,
+    bytes: i64,
 ) -> Result<(), DocError> {
     let version_id = Uuid::now_v7();
-    let sha = staged.sha256.to_hex();
     let version = NewVersion {
         id: version_id,
         document_id,
         seq,
         storage_object_id: object_id,
-        sha256: &sha,
-        bytes: size_i64(staged.size)?,
-        author_id: c.owner(),
+        sha256,
+        bytes,
+        author_id: c.actor_id(),
         author_name: &c.actor.display_name,
     };
     versions::insert(&mut *conn, &version)

@@ -26,7 +26,7 @@ pub(super) async fn owned_folder(
         .map_err(DocError::db)?
         .ok_or(DocError::NotFound)?;
     authorize(
-        c.actor,
+        Some(c.actor),
         Resource::Folder {
             owner_id: &row.owner_id,
         },
@@ -61,13 +61,13 @@ impl Documents {
     /// An active folder with its path; a trashed one is as missing as another owner's.
     pub async fn get_folder(&self, c: &Caller<'_>, id: Uuid) -> Result<FolderPath, DocError> {
         let folder = active_folder(&self.db, c, id, Action::Read).await?;
-        let rows = folders::ancestors(&self.db, c.owner(), id)
+        let rows = folders::ancestors(&self.db, c.actor_id(), id)
             .await
             .map_err(DocError::db)?;
         let mut ancestors = Vec::with_capacity(rows.len());
         for row in rows {
             authorize(
-                c.actor,
+                Some(c.actor),
                 Resource::Folder {
                     owner_id: &row.owner_id,
                 },
@@ -101,8 +101,8 @@ impl Documents {
     ) -> Result<Folder, DocError> {
         let name = Name::parse(name)?;
         let mut tx = self.begin().await?;
-        self.touch_actor(&mut tx, c).await?;
-        locks::tree(&mut tx, c.owner())
+        self.touch_actor(&mut tx, c, c.actor_id()).await?;
+        locks::tree(&mut tx, c.actor_id())
             .await
             .map_err(DocError::db)?;
         if let Some(parent) = parent_id {
@@ -111,7 +111,7 @@ impl Documents {
         let key = name.key();
         let new = folders::NewFolder {
             id: Uuid::now_v7(),
-            owner_id: c.owner(),
+            owner_id: c.actor_id(),
             parent_id,
             name: name.as_str(),
             name_key: &key,
@@ -148,7 +148,7 @@ impl Documents {
         let name = patch.name.as_deref().map(Name::parse).transpose()?;
         let key = name.as_ref().map(Name::key);
         let mut tx = self.begin().await?;
-        locks::tree(&mut tx, c.owner())
+        locks::tree(&mut tx, c.actor_id())
             .await
             .map_err(DocError::db)?;
         active_folder(&mut *tx, c, id, Action::Write).await?;
@@ -187,7 +187,7 @@ impl Documents {
 
     async fn trash_folder_inner(&self, c: &Caller<'_>, id: Uuid) -> Result<(), DocError> {
         let mut tx = self.begin().await?;
-        locks::tree(&mut tx, c.owner())
+        locks::tree(&mut tx, c.actor_id())
             .await
             .map_err(DocError::db)?;
         let row = owned_folder(&mut *tx, c, id, Action::Trash).await?;
@@ -196,7 +196,7 @@ impl Documents {
             ItemState::Trashed => return Ok(()),
             _ => return Err(DocError::NotFound),
         }
-        folders::trash_tree(&mut tx, c.owner(), id)
+        folders::trash_tree(&mut tx, c.actor_id(), id)
             .await
             .map_err(DocError::db)?;
         audit::success(&mut tx, c, "folder.trash", Subject::Folder(id)).await?;
@@ -214,7 +214,7 @@ impl Documents {
 
     async fn restore_folder_inner(&self, c: &Caller<'_>, id: Uuid) -> Result<Folder, DocError> {
         let mut tx = self.begin().await?;
-        locks::tree(&mut tx, c.owner())
+        locks::tree(&mut tx, c.actor_id())
             .await
             .map_err(DocError::db)?;
         let row = owned_folder(&mut *tx, c, id, Action::Restore).await?;
@@ -224,7 +224,7 @@ impl Documents {
             _ => return Err(DocError::NotFound),
         }
         let parent = restore_target(&mut tx, c, row.parent_id).await?;
-        let restored = folders::restore_tree(&mut tx, c.owner(), id, parent)
+        let restored = folders::restore_tree(&mut tx, c.actor_id(), id, parent)
             .await
             .map_err(name_conflict)?
             .ok_or(DocError::NotFound)?;

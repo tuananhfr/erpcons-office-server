@@ -69,7 +69,8 @@ async fn tokens_and_names_stay_out_of_logs_and_audit() {
     let ok = app.get_as("/api/v1/me", &token).await;
     assert_eq!(ok.status(), 200);
     let ok_id = request_id(&ok);
-    let canaries = touch_documents(&app, &token).await;
+    let (canaries, doc_id) = touch_documents(&app, &token).await;
+    let shared = share_and_link(&app, &token, &doc_id).await;
     assert_eq!(app.get_as("/api/v1/me", rejected).await.status(), 401);
     // A key PI rotated in while it is down cannot be fetched: the check is unavailable.
     app.pi.rotate("2027-04", true);
@@ -79,6 +80,7 @@ async fn tokens_and_names_stay_out_of_logs_and_audit() {
 
     let mut secrets = vec![token.as_str(), fresh.as_str(), rejected, DEFAULT_NAME];
     secrets.extend(canaries);
+    secrets.extend(shared.iter().map(String::as_str));
     let text = logs.text();
     assert!(text.contains(&ok_id), "request spans are logged: {text}");
     assert!(
@@ -93,7 +95,7 @@ async fn tokens_and_names_stay_out_of_logs_and_audit() {
         .fetch_all(app.pool())
         .await
         .expect("audit rows");
-    assert_eq!(rows.len(), 8, "{rows:?}");
+    assert_eq!(rows.len(), 14, "{rows:?}");
     for row in &rows {
         for secret in secrets.iter().copied() {
             assert!(!row.contains(secret), "{secret:?} leaked into audit: {row}");
@@ -110,10 +112,16 @@ async fn tokens_and_names_stay_out_of_logs_and_audit() {
             ("auth.verify".into(), "denied".into()),
             ("auth.verify".into(), "error".into()),
             ("document.create".into(), "success".into()),
+            ("document.link_disable".into(), "success".into()),
+            ("document.link_enable".into(), "success".into()),
             ("document.save".into(), "success".into()),
+            ("document.share".into(), "success".into()),
             ("document.update".into(), "success".into()),
             ("folder.create".into(), "success".into()),
             ("folder.update".into(), "success".into()),
+            ("link.content".into(), "success".into()),
+            ("link.open".into(), "success".into()),
+            ("me.read".into(), "success".into()),
             ("me.read".into(), "success".into()),
         ]
     );
@@ -128,8 +136,9 @@ const CANARIES: [&str; 5] = [
     "canary-bytes-e41f",
 ];
 
-/// Creates, renames and saves through every mutating route that carries a name or bytes.
-async fn touch_documents(app: &TestApp, token: &str) -> [&'static str; 5] {
+/// Creates, renames and saves through every mutating route that carries a name or bytes; returns
+/// the canaries and the document's id.
+async fn touch_documents(app: &TestApp, token: &str) -> ([&'static str; 5], String) {
     let [folder_name, renamed, title, file_name, marker] = CANARIES;
     let folder = app
         .post_json("/api/v1/folders", token, &json!({ "name": folder_name }))
@@ -166,5 +175,57 @@ async fn touch_documents(app: &TestApp, token: &str) -> [&'static str; 5] {
         .put_content(token, doc_id, Some(&tag), docx(&format!("{marker} v2")))
         .await;
     assert_eq!(saved.status(), 200);
-    CANARIES
+    (CANARIES, doc_id.to_owned())
+}
+
+/// Shares by email (with an account and pending) and opens the public link; returns what must
+/// stay out: the emails, the recipient's name and token, and the link token.
+async fn share_and_link(app: &TestApp, token: &str, doc_id: &str) -> Vec<String> {
+    let email = "canary.email.9b1d@erpcons.test";
+    let pending = "canary.pending.4e7a@erpcons.test";
+    let name = "Canary người nhận c0de";
+    app.pi.add_user("usr_canary", name);
+    app.pi.set_email("usr_canary", email, true);
+    let recipient = app.pi.token_for("usr_canary");
+    assert_eq!(app.get_as("/api/v1/me", &recipient).await.status(), 200);
+    let shared = app
+        .send_json(
+            Method::POST,
+            &format!("/api/v1/documents/{doc_id}/permissions"),
+            token,
+            &json!({ "emails": [email, pending], "role": "viewer", "notify": true, "message": "Canary lời nhắn 6a1f" }),
+        )
+        .await;
+    assert_eq!(shared.status(), 200);
+    let link = app
+        .request(
+            Method::PUT,
+            &format!("/api/v1/documents/{doc_id}/link"),
+            token,
+        )
+        .send()
+        .await
+        .expect("link");
+    let link: Value = link.json().await.expect("link body");
+    let link = link["token"].as_str().expect("token").to_owned();
+    assert_eq!(app.open_link(&link).await.status(), 200);
+    assert_eq!(app.open_link_content(&link).await.status(), 200);
+    let off = app
+        .request(
+            Method::DELETE,
+            &format!("/api/v1/documents/{doc_id}/link"),
+            token,
+        )
+        .send()
+        .await
+        .expect("disable");
+    assert_eq!(off.status(), 204);
+    vec![
+        email.to_owned(),
+        pending.to_owned(),
+        name.to_owned(),
+        recipient,
+        link,
+        "Canary lời nhắn 6a1f".to_owned(),
+    ]
 }

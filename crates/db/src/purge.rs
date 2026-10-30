@@ -30,17 +30,19 @@ const NO_LIVE_REFERENCE: &str = "NOT EXISTS (
         SELECT 1 FROM document_versions v JOIN documents d ON d.id = v.document_id
         WHERE v.storage_object_id = o.id AND d.state NOT IN ('PURGE_PENDING', 'PURGED'))";
 
-/// Durable objects referenced only by documents being purged or purged.
+/// Objects nothing live uses: durable ones referenced only by documents being purged or purged,
+/// and those whose last live version was deleted (`DELETE_PENDING`).
 pub async fn dead_objects(
     db: impl PgExecutor<'_>,
     limit: i64,
 ) -> Result<Vec<DeadObject>, sqlx::Error> {
     sqlx::query_as(&format!(
         "SELECT o.id, o.opaque_key, o.sha256 FROM storage_objects o
-         WHERE o.durability_state = 'DURABLE'
-           AND EXISTS (
-               SELECT 1 FROM document_versions v JOIN documents d ON d.id = v.document_id
-               WHERE v.storage_object_id = o.id AND d.state = 'PURGE_PENDING')
+         WHERE (o.durability_state = 'DELETE_PENDING'
+                OR (o.durability_state = 'DURABLE'
+                    AND EXISTS (
+                        SELECT 1 FROM document_versions v JOIN documents d ON d.id = v.document_id
+                        WHERE v.storage_object_id = o.id AND d.state = 'PURGE_PENDING')))
            AND {NO_LIVE_REFERENCE}
          ORDER BY o.id
          LIMIT $1"
@@ -55,11 +57,26 @@ pub async fn still_dead(conn: &mut PgConnection, id: Uuid) -> Result<bool, sqlx:
     sqlx::query_scalar(&format!(
         "SELECT EXISTS (
              SELECT 1 FROM storage_objects o
-             WHERE o.id = $1 AND o.durability_state = 'DURABLE' AND {NO_LIVE_REFERENCE})"
+             WHERE o.id = $1 AND o.durability_state IN ('DURABLE', 'DELETE_PENDING')
+               AND {NO_LIVE_REFERENCE})"
     ))
     .bind(id)
     .fetch_one(conn)
     .await
+}
+
+/// After a version was deleted: `DELETE_PENDING` when no live version uses object `id` any more,
+/// so its bytes are deleted, by the request or else by the purge job. A save that stores the same
+/// content again makes it `DURABLE` ([`crate::objects::upsert`]).
+pub async fn release_if_unused(conn: &mut PgConnection, id: Uuid) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(&format!(
+        "UPDATE storage_objects o SET durability_state = 'DELETE_PENDING'
+         WHERE o.id = $1 AND o.durability_state = 'DURABLE' AND {NO_LIVE_REFERENCE}"
+    ))
+    .bind(id)
+    .execute(conn)
+    .await?;
+    Ok(result.rows_affected() == 1)
 }
 
 pub async fn mark_deleted(db: impl PgExecutor<'_>, id: Uuid) -> Result<(), sqlx::Error> {
@@ -113,6 +130,31 @@ pub async fn mark_pending(
     .bind(ids)
     .fetch_all(db)
     .await
+}
+
+/// Deletes the permissions, invitations, share settings and link of purge-bound or purged documents
+/// (`ids` only, when given). Their metadata stays as `PURGED`; who it was shared with does not.
+pub async fn forget_sharing(
+    conn: &mut PgConnection,
+    ids: Option<&[Uuid]>,
+) -> Result<u64, sqlx::Error> {
+    let acl = sqlx::query(
+        "DELETE FROM document_acl a USING documents d
+         WHERE d.id = a.document_id AND d.state IN ('PURGE_PENDING', 'PURGED')
+           AND ($1::uuid[] IS NULL OR d.id = ANY($1))",
+    )
+    .bind(ids)
+    .execute(&mut *conn)
+    .await?;
+    let settings = sqlx::query(
+        "DELETE FROM document_share_settings s USING documents d
+         WHERE d.id = s.document_id AND d.state IN ('PURGE_PENDING', 'PURGED')
+           AND ($1::uuid[] IS NULL OR d.id = ANY($1))",
+    )
+    .bind(ids)
+    .execute(conn)
+    .await?;
+    Ok(acl.rows_affected() + settings.rows_affected())
 }
 
 /// As [`dead_objects`], limited to the content of `document_ids`.

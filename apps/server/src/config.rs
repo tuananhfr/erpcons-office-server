@@ -3,10 +3,11 @@ use std::{net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
 use office_api::{ApiConfig, RateConfig, TrustedProxies};
 use office_db::PoolConfig;
 use office_documents::{
-    QuotaConfig,
+    LinkKey, QuotaConfig,
     jobs::{AuditRetentionConfig, OrphanConfig, PurgeConfig},
 };
 use office_identity::JwtVerifierConfig;
+use office_mail::{MailConfig, SmtpConfig, TlsMode};
 
 use crate::jobs::JobsConfig;
 
@@ -17,6 +18,8 @@ pub(crate) enum ConfigError {
     // The value is never echoed: DATABASE_URL carries the password.
     #[error("{0} has an invalid value")]
     Invalid(&'static str),
+    #[error("ERPCONS_LINK_KEY must be 32 bytes in standard base64 (openssl rand -base64 32)")]
+    InvalidLinkKey,
 }
 
 /// Server settings. No `Debug`, so the database password cannot be logged by accident.
@@ -27,6 +30,8 @@ pub(crate) struct ServerConfig {
     pub identity: JwtVerifierConfig,
     pub api: ApiConfig,
     pub jobs: JobsConfig,
+    /// `None` without `ERPCONS_SMTP_HOST`: no mail is queued or sent.
+    pub mail: Option<MailConfig>,
 }
 
 impl ServerConfig {
@@ -86,6 +91,11 @@ impl ServerConfig {
         if max_body_bytes < quota.max_file_bytes {
             return Err(ConfigError::Invalid("ERPCONS_MAX_BODY_BYTES"));
         }
+        let mail = vars.mail()?;
+        // Required even before anyone shares a link: a key added later could not open the tokens
+        // sealed without it.
+        let link_key = LinkKey::from_base64(&vars.required("ERPCONS_LINK_KEY")?)
+            .map_err(|_| ConfigError::InvalidLinkKey)?;
         let api = ApiConfig {
             quota,
             max_body_bytes,
@@ -104,6 +114,13 @@ impl ServerConfig {
                 "ERPCONS_RATE_VERIFY_PER_SEC",
                 defaults.verify_rate,
             )?,
+            link_rate: vars.rate(
+                "ERPCONS_RATE_LINK_BURST",
+                "ERPCONS_RATE_LINK_PER_SEC",
+                defaults.link_rate,
+            )?,
+            mail: mail.as_ref().map(MailConfig::policy).unwrap_or_default(),
+            link_key: Some(link_key),
             max_concurrent_uploads: vars.positive(
                 "ERPCONS_MAX_CONCURRENT_UPLOADS",
                 defaults.max_concurrent_uploads,
@@ -122,6 +139,7 @@ impl ServerConfig {
             identity,
             api,
             jobs,
+            mail,
         })
     }
 }
@@ -205,6 +223,55 @@ impl<F: Fn(&str) -> Option<String>> Vars<F> {
         }))
     }
 
+    /// SMTP and what mail needs besides; all of it ignored without `ERPCONS_SMTP_HOST`.
+    fn mail(&self) -> Result<Option<MailConfig>, ConfigError> {
+        let Some(host) = self.get("ERPCONS_SMTP_HOST") else {
+            return Ok(None);
+        };
+        let tls = match self.get("ERPCONS_SMTP_TLS") {
+            None => TlsMode::Starttls,
+            Some(v) => TlsMode::parse(&v).ok_or(ConfigError::Invalid("ERPCONS_SMTP_TLS"))?,
+        };
+        let port: u16 = self.parsed("ERPCONS_SMTP_PORT", tls.default_port())?;
+        if port == 0 {
+            return Err(ConfigError::Invalid("ERPCONS_SMTP_PORT"));
+        }
+        let username = self.get("ERPCONS_SMTP_USERNAME");
+        let password = self.get("ERPCONS_SMTP_PASSWORD");
+        if username.is_some() != password.is_some() {
+            return Err(ConfigError::Missing(if username.is_some() {
+                "ERPCONS_SMTP_PASSWORD"
+            } else {
+                "ERPCONS_SMTP_USERNAME"
+            }));
+        }
+        let origin = self.required("ERPCONS_PUBLIC_ORIGIN")?;
+        let origin = origin.trim().trim_end_matches('/');
+        let has_host = origin
+            .split_once("://")
+            .is_some_and(|(scheme, rest)| matches!(scheme, "https" | "http") && !rest.is_empty());
+        if !has_host || origin.contains(['?', '#', ' ']) {
+            return Err(ConfigError::Invalid("ERPCONS_PUBLIC_ORIGIN"));
+        }
+        Ok(Some(MailConfig {
+            smtp: SmtpConfig {
+                host: host.trim().to_owned(),
+                port,
+                tls,
+                username,
+                password,
+            },
+            from: self.required("ERPCONS_MAIL_FROM")?.trim().to_owned(),
+            public_origin: origin.to_owned(),
+            include_title: self.parsed("ERPCONS_MAIL_INCLUDE_TITLE", false)?,
+            daily_cap: self.parsed("ERPCONS_MAIL_DAILY_CAP", office_mail::DEFAULT_DAILY_CAP)?,
+            global_daily_cap: self.parsed(
+                "ERPCONS_MAIL_GLOBAL_DAILY_CAP",
+                office_mail::DEFAULT_GLOBAL_DAILY_CAP,
+            )?,
+        }))
+    }
+
     fn positive(&self, name: &'static str, default: usize) -> Result<usize, ConfigError> {
         match self.parsed(name, default)? {
             0 => Err(ConfigError::Invalid(name)),
@@ -238,10 +305,14 @@ mod tests {
 
     use super::*;
 
-    const REQUIRED: [(&str, &str); 3] = [
+    /// A development key; never use it outside tests.
+    const DEV_LINK_KEY: &str = "ZXJwY29ucy1vZmZpY2UtZGV2LWxpbmsta2V5LTAwMDE=";
+
+    const REQUIRED: [(&str, &str); 4] = [
         ("DATABASE_URL", "postgres://u:secret@db/office"),
         ("ERPCONS_DATA_DIR", "/data"),
         ("PI_ISSUER", "https://id.pi.example"),
+        ("ERPCONS_LINK_KEY", DEV_LINK_KEY),
     ];
 
     fn load(extra: &[(&str, &str)]) -> Result<ServerConfig, ConfigError> {
@@ -278,6 +349,97 @@ mod tests {
         );
         assert_eq!(c.api.max_concurrent_uploads, 3);
         assert_eq!(c.api.verify_rate, ApiConfig::default().verify_rate);
+        assert_eq!(c.api.link_rate, ApiConfig::default().link_rate);
+        assert!(c.mail.is_none(), "no SMTP host, no mail");
+        assert!(!c.api.mail.enabled);
+        assert_eq!(
+            c.api.link_key,
+            Some(LinkKey::from_base64(DEV_LINK_KEY).expect("dev key"))
+        );
+    }
+
+    const SMTP: [(&str, &str); 3] = [
+        ("ERPCONS_SMTP_HOST", "smtp.example.vn"),
+        ("ERPCONS_MAIL_FROM", "ERPCons Office <no-reply@erpcons.vn>"),
+        ("ERPCONS_PUBLIC_ORIGIN", "https://office.erpcons.vn/"),
+    ];
+
+    #[test]
+    fn mail_defaults_to_starttls_without_titles() {
+        let c = load(&SMTP).expect("config");
+        let mail = c.mail.expect("mail on");
+        assert_eq!(mail.smtp.host, "smtp.example.vn");
+        assert_eq!(mail.smtp.tls, TlsMode::Starttls);
+        assert_eq!(mail.smtp.port, 587);
+        assert_eq!(mail.smtp.username, None);
+        assert_eq!(mail.public_origin, "https://office.erpcons.vn");
+        assert!(!mail.include_title);
+        assert!(c.api.mail.enabled);
+        assert!(!c.api.mail.include_title);
+        assert_eq!(c.api.mail.daily_cap, 100);
+        assert_eq!(c.api.mail.global_daily_cap, 2000);
+    }
+
+    #[test]
+    fn mail_overrides_apply() {
+        let mut vars = SMTP.to_vec();
+        vars.extend([
+            ("ERPCONS_SMTP_TLS", "tls"),
+            ("ERPCONS_SMTP_USERNAME", "office"),
+            ("ERPCONS_SMTP_PASSWORD", "smtp-secret"),
+            ("ERPCONS_MAIL_INCLUDE_TITLE", "true"),
+            ("ERPCONS_MAIL_DAILY_CAP", "20"),
+            ("ERPCONS_MAIL_GLOBAL_DAILY_CAP", "500"),
+            ("ERPCONS_RATE_LINK_BURST", "9"),
+        ]);
+        let c = load(&vars).expect("config");
+        let mail = c.mail.expect("mail on");
+        assert_eq!(mail.smtp.tls, TlsMode::Tls);
+        assert_eq!(mail.smtp.port, 465);
+        assert_eq!(mail.smtp.username.as_deref(), Some("office"));
+        assert!(mail.include_title);
+        assert!(c.api.mail.include_title);
+        assert_eq!(c.api.mail.daily_cap, 20);
+        assert_eq!(c.api.mail.global_daily_cap, 500);
+        assert_eq!(c.api.link_rate.burst, 9);
+    }
+
+    #[test]
+    fn mail_settings_are_checked_only_with_a_host() {
+        assert!(load(&[("ERPCONS_SMTP_TLS", "bogus")]).is_ok());
+        let with = |extra: (&'static str, &'static str)| {
+            let mut vars = SMTP.to_vec();
+            vars.push(extra);
+            load(&vars).err()
+        };
+        assert_eq!(
+            with(("ERPCONS_SMTP_TLS", "bogus")),
+            Some(ConfigError::Invalid("ERPCONS_SMTP_TLS"))
+        );
+        assert_eq!(
+            with(("ERPCONS_SMTP_USERNAME", "office")),
+            Some(ConfigError::Missing("ERPCONS_SMTP_PASSWORD"))
+        );
+        assert_eq!(
+            with(("ERPCONS_PUBLIC_ORIGIN", "office.erpcons.vn")),
+            Some(ConfigError::Invalid("ERPCONS_PUBLIC_ORIGIN"))
+        );
+        assert_eq!(
+            with(("ERPCONS_SMTP_PORT", "0")),
+            Some(ConfigError::Invalid("ERPCONS_SMTP_PORT"))
+        );
+        assert_eq!(
+            with(("ERPCONS_MAIL_DAILY_CAP", "-1")),
+            Some(ConfigError::Invalid("ERPCONS_MAIL_DAILY_CAP"))
+        );
+        let no_from: Vec<_> = SMTP
+            .into_iter()
+            .filter(|(k, _)| *k != "ERPCONS_MAIL_FROM")
+            .collect();
+        assert_eq!(
+            load(&no_from).err(),
+            Some(ConfigError::Missing("ERPCONS_MAIL_FROM"))
+        );
     }
 
     #[test]
@@ -361,6 +523,25 @@ mod tests {
             .collect();
         let err = ServerConfig::from_lookup(|name| vars.get(name).map(|v| (*v).to_owned()));
         assert_eq!(err.err(), Some(ConfigError::Missing("PI_ISSUER")));
+    }
+
+    #[test]
+    fn the_link_key_is_required_and_checked() {
+        let vars: HashMap<&str, &str> = REQUIRED
+            .into_iter()
+            .filter(|(k, _)| *k != "ERPCONS_LINK_KEY")
+            .collect();
+        let err = ServerConfig::from_lookup(|name| vars.get(name).map(|v| (*v).to_owned()));
+        assert_eq!(err.err(), Some(ConfigError::Missing("ERPCONS_LINK_KEY")));
+        for bad in [
+            "change-me",
+            "c2hvcnQ=",
+            "ZXJwY29ucy1vZmZpY2UtZGV2LWxpbmsta2V5LTAwMDEx",
+        ] {
+            let err = load(&[("ERPCONS_LINK_KEY", bad)]).err().expect("invalid");
+            assert_eq!(err, ConfigError::InvalidLinkKey, "{bad}");
+            assert!(!err.to_string().contains(bad));
+        }
     }
 
     #[test]

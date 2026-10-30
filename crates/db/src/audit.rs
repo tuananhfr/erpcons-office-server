@@ -5,6 +5,8 @@ use uuid::Uuid;
 pub enum ActorKind {
     User,
     System,
+    /// Someone holding a public view link; no actor, and the token is never recorded.
+    Link,
 }
 
 impl ActorKind {
@@ -12,6 +14,7 @@ impl ActorKind {
         match self {
             Self::User => "user",
             Self::System => "system",
+            Self::Link => "link",
         }
     }
 }

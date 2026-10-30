@@ -3,6 +3,7 @@ use std::time::Instant;
 use axum::{extract::FromRequestParts, http::request::Parts};
 use office_db::audit::{ActorKind, AuditEvent, Outcome};
 use office_identity::{Actor, VerifyError};
+use tracing::error;
 
 use crate::{
     ApiError, AppState, ErrorCode, RequestId, audit, bearer::bearer_token, rate_limit::ClientKey,
@@ -31,7 +32,11 @@ impl FromRequestParts<AppState> for Authenticated {
                     .verify_limiter
                     .check(client, Instant::now())
                     .map_err(ApiError::rate_limited)?;
-                state.identity.verify(token).await
+                let verdict = state.identity.verify(token).await;
+                if let Ok(actor) = &verdict {
+                    sync_actor(state, actor).await;
+                }
+                verdict
             }
         };
         let actor = match verdict {
@@ -57,6 +62,14 @@ impl FromRequestParts<AppState> for Authenticated {
             .check(actor.actor_id.clone(), Instant::now())
             .map_err(ApiError::rate_limited)?;
         Ok(Self(actor))
+    }
+}
+
+/// Records the actor and its verified email, and hands it the invitations waiting for that email.
+/// Once per verification, not per request. A failure only delays that, so the request goes on.
+async fn sync_actor(state: &AppState, actor: &Actor) {
+    if let Err(e) = state.docs.sync_actor(actor).await {
+        error!(error = %e, "syncing the actor failed");
     }
 }
 

@@ -37,7 +37,7 @@ pub(super) async fn success(
     let (document_id, folder_id) = subject.ids();
     let event = AuditEvent {
         actor_kind: ActorKind::User,
-        actor_id: Some(c.owner()),
+        actor_id: Some(c.actor_id()),
         tenant_id: None,
         document_id,
         folder_id,
@@ -69,6 +69,29 @@ pub(crate) async fn system(
     audit::insert(conn, &event).await.map_err(DocError::db)
 }
 
+/// A view through the public link: no actor, and never the token.
+pub(super) async fn link(
+    db: impl office_db::PgExecutor<'_>,
+    action: &'static str,
+    document_id: Uuid,
+    trace_id: &str,
+) {
+    let event = AuditEvent {
+        actor_kind: ActorKind::Link,
+        actor_id: None,
+        tenant_id: None,
+        document_id: Some(document_id),
+        folder_id: None,
+        action,
+        outcome: Outcome::Success,
+        trace_id,
+    };
+    // A view changes nothing; failing it because the audit write failed would only hide the cause.
+    if let Err(e) = audit::insert(db, &event).await {
+        error!(action, error = %e, "audit write failed");
+    }
+}
+
 impl Documents {
     /// Records a refused or failed mutation. Best effort: the transaction is gone, and failing the
     /// request again because the audit write failed would hide the first error.
@@ -84,12 +107,12 @@ impl Documents {
         };
         let (document_id, folder_id) = subject.ids();
         let outcome = match err {
-            DocError::NotFound => Outcome::Denied,
+            DocError::NotFound | DocError::Forbidden => Outcome::Denied,
             _ => Outcome::Error,
         };
         let event = AuditEvent {
             actor_kind: ActorKind::User,
-            actor_id: Some(c.owner()),
+            actor_id: Some(c.actor_id()),
             tenant_id: None,
             document_id,
             folder_id,

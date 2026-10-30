@@ -4,10 +4,14 @@ Backend of the ERPCons Office online tier: documents saved online for signed-in 
 site's own origin (`office.erpcons.vn`, Apache reverse proxy to `127.0.0.1:8710`). The free tier never calls it.
 
 - Contract: [`docs/openapi.yaml`](docs/openapi.yaml) (source of truth for paths, error body and codes).
-- Plan and decisions: `erpcons-workspace/tmp/briefs/office-online-v1/plan.md`, ADR `online-tier.md` in `erpcons-office`.
-- Status: milestone 2, the document API. Health and `/me` (milestone 1), folders, documents (upload, blank, content,
-  save with `If-Match` and replay of a save whose answer was lost, versions), folder path, trash and purge on request,
-  plus the purge, orphan and audit retention jobs.
+- Plan and decisions: `erpcons-workspace/tmp/briefs/office-online-v1/plan.md` (phase 1),
+  `tmp/briefs/office-online-v2/plan.md` (phase 2), ADR `online-tier.md` in `erpcons-office`.
+- Status: phase 1 (health, `/me`, folders, documents: upload, blank, content, save with `If-Match` and replay of a
+  save whose answer was lost, versions, folder path, trash and purge on request, the purge, orphan and audit retention
+  jobs), plus phase 2 milestone 1 (old versions' bytes, restoring a version, deleting an old version: owner only, bytes
+  freed when no other version uses them) and the server part of milestone 2
+  (sharing by email with roles, pending invitations, share settings, the public view link, "Shared with me",
+  "shared with you" mail through an outbox).
 - Known limit: `Idempotency-Key` stores the response after the create commits. If the server dies in between, the
   key's claim lapses after 60 s and a repeat creates a second item instead of replaying the first.
 
@@ -17,8 +21,9 @@ site's own origin (`office.erpcons.vn`, Apache reverse proxy to `127.0.0.1:8710`
 |---|---|
 | `apps/server` | Binary: configuration from the environment, start-up (migrations), background jobs, graceful shutdown |
 | `crates/api` | axum router and thin handlers, `Error` body (also for framework rejections), request id, bearer auth (sampled denial audit), rate limits (per address with IPv6 by /64, per actor, token checks, concurrent uploads), body limits (64 KiB JSON), `Idempotency-Key`, tracing |
-| `crates/documents` | Document service: `authorize` (deny by default, owner only), folders and documents, durable save (bytes of a failed request are removed at once), quota, intake checks (signature, ZIP bomb), purge on request, purge, orphan and audit retention jobs, blank templates in `templates/` |
-| `crates/identity` | `IdentityVerifier`; `JwtVerifier` checks PI ID access tokens locally (EdDSA JWT: signature against PI's JWKS, `alg`, `typ`, `iss`, `exp`/`nbf`/`iat`, `aud`, `azp`, `sub`), caches verdicts 60 s (never past `exp`) and asks PI's `/id/userinfo` for the display name once per actor and hour; `testing::FakePi` stands in for PI in tests |
+| `crates/documents` | Document service: `authorize` (deny by default; roles owner, editor, commenter, viewer, link, read from the database on every request), folders and documents, durable save (bytes of a failed request are removed at once), version restore, quota (charged to the document's owner), sharing (permissions by email, pending invitations, share settings, link tokens stored as sha256, "Shared with me"), intake checks (signature, ZIP bomb), purge on request, purge, orphan and audit retention jobs, blank templates in `templates/` |
+| `crates/mail` | "Shared with you" mail: the notice queued in `mail_outbox`, its Vietnamese text, the SMTP transport (lettre, rustls) and the outbox job (retries with backoff for up to 24 h) |
+| `crates/identity` | `IdentityVerifier`; `JwtVerifier` checks PI ID access tokens locally (EdDSA JWT: signature against PI's JWKS, `alg`, `typ`, `iss`, `exp`/`nbf`/`iat`, `aud`, `azp`, `sub`), caches verdicts 60 s (never past `exp`) and asks PI's `/id/userinfo` for the display name and the verified email once per actor and hour; `testing::FakePi` stands in for PI in tests |
 | `crates/storage` | `StorageAdapter`; `FsStorage` stores objects by sha256 (temp file, fsync, verify, rename) |
 | `crates/db` | sqlx Postgres pool, migrations in `crates/db/migrations/` (run at start-up), queries |
 | `deploy/` | `compose.yaml` (Postgres 17 + server) and `.env.example` |
@@ -30,6 +35,7 @@ site's own origin (`office.erpcons.vn`, Apache reverse proxy to `127.0.0.1:8710`
 | `DATABASE_URL` | required | Postgres URL |
 | `ERPCONS_DATA_DIR` | required (`/data` in the image) | Object store root |
 | `PI_ISSUER` | required | PI ID issuer, exactly as the tokens' `iss` (PI's `pi_id_issuer`); keys come from `{PI_ISSUER}/id/jwks.json`, names from `{PI_ISSUER}/id/userinfo` |
+| `ERPCONS_LINK_KEY` | required | 32 bytes in standard base64 (`openssl rand -base64 32`); seals public link tokens so sharers can copy a link again. Missing or malformed, the server does not start. Back it up with the database: under a new key old links still open, but the dialog shows them only after they are turned off and on again |
 | `PI_AUDIENCES` | `pi-platform` | Comma-separated; a token's `aud` must name one |
 | `PI_ALLOWED_CLIENTS` | `erpcons-office-web` | Comma-separated; a token's `azp` must be one (add `erpcons-office-desktop` when the desktop apps sync) |
 | `ERPCONS_BIND` | `127.0.0.1:8710` (`0.0.0.0:8710` in the image) | Listen address |
@@ -48,6 +54,15 @@ site's own origin (`office.erpcons.vn`, Apache reverse proxy to `127.0.0.1:8710`
 | `ERPCONS_TRASH_RETENTION_DAYS` | `30` | Trashed items stay restorable this long, then are purged |
 | `ERPCONS_ORPHAN_MIN_AGE_SECS` | `600` (at least `60`) | Stored bytes with no row are deleted once this old |
 | `ERPCONS_AUDIT_RETENTION_DAYS` | `180` | Audit rows older than this are deleted hourly; `0` keeps them forever |
+| `ERPCONS_RATE_LINK_BURST` / `ERPCONS_RATE_LINK_PER_SEC` | `60` / `2` | Per client address, opening public view links (no sign-in) |
+| `ERPCONS_SMTP_HOST` | unset | SMTP server for "shared with you" mail; unset, no mail is queued or sent and the settings below are ignored |
+| `ERPCONS_SMTP_TLS` / `ERPCONS_SMTP_PORT` | `starttls` / by mode | `starttls` (587), `tls` (465) or `none` (25, a local relay only) |
+| `ERPCONS_SMTP_USERNAME` / `ERPCONS_SMTP_PASSWORD` | unset | Both or neither |
+| `ERPCONS_MAIL_FROM` | required with a host | `From:`, e.g. `ERPCons Office <no-reply@erpcons.vn>` |
+| `ERPCONS_PUBLIC_ORIGIN` | required with a host | The site's origin for the link in the mail (`https://office.erpcons.ai`) |
+| `ERPCONS_MAIL_INCLUDE_TITLE` | `false` | Put the document title in the mail |
+| `ERPCONS_MAIL_DAILY_CAP` | `100` | Invite mails one account may cause per rolling 24 h; past it sharing still succeeds without mail (`mail_skipped`) |
+| `ERPCONS_MAIL_GLOBAL_DAILY_CAP` | `2000` | Invite mails the whole server queues per rolling 24 h; one address also receives at most 10 a day (fixed) |
 | `RUST_LOG` | `info,sqlx=warn` | Log filter |
 
 ## Tests

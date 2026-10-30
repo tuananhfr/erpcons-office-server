@@ -2,7 +2,7 @@ use office_storage::StorageError;
 use tracing::error;
 
 use crate::{
-    NotFound, QuotaError,
+    Denied, QuotaError,
     intake::{Rejection, ValidatingReader},
     names::InvalidName,
 };
@@ -12,12 +12,17 @@ use crate::{
 pub enum DocError {
     #[error("not found")]
     NotFound,
+    #[error("forbidden")]
+    Forbidden,
     #[error("name taken")]
     NameTaken,
     #[error("folder cycle")]
     FolderCycle,
     #[error("version conflict")]
     VersionConflict { latest_version: i32 },
+    /// The current version cannot be deleted.
+    #[error("current version")]
+    CurrentVersion,
     #[error("quota exceeded")]
     QuotaExceeded,
     #[error("file too large")]
@@ -30,6 +35,16 @@ pub enum DocError {
     InvalidRequest,
     #[error("unavailable")]
     Unavailable,
+    /// Lost a race with a concurrent writer even after retrying; nothing was written, so the same
+    /// request may simply be sent again.
+    #[error("contended")]
+    Contended,
+    /// A document has as many permissions and invitations as it may hold.
+    #[error("too many permissions")]
+    TooManyPermissions,
+    /// The caller gave access to as many new addresses as it may in a day.
+    #[error("too many recipients")]
+    TooManyRecipients,
 }
 
 /// Put into an upload's read error by the HTTP layer when the request body passed its limit.
@@ -65,9 +80,12 @@ impl DocError {
     }
 }
 
-impl From<NotFound> for DocError {
-    fn from(_: NotFound) -> Self {
-        Self::NotFound
+impl From<Denied> for DocError {
+    fn from(d: Denied) -> Self {
+        match d {
+            Denied::NotFound => Self::NotFound,
+            Denied::Forbidden => Self::Forbidden,
+        }
     }
 }
 

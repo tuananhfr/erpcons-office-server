@@ -1,16 +1,38 @@
-use sqlx::{PgConnection, PgExecutor};
+use sqlx::PgExecutor;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::ItemState;
 
-/// A document with its current version; drafts (no version yet) never match the join.
-const SELECT: &str =
-    "SELECT d.id, d.owner_id, d.folder_id, d.title, d.kind, d.mime, d.state, d.etag,
-            d.trashed_at, d.created_at, d.updated_at, v.seq AS version, v.bytes AS size
-     FROM documents d JOIN document_versions v ON v.id = d.current_version_id";
+/// A permission or pending invitation in force, or the public link, on document `d`.
+const SHARED: &str = "(EXISTS (
+         SELECT 1 FROM document_acl sa
+         WHERE sa.document_id = d.id AND sa.revoked_at IS NULL
+           AND (sa.expires_at IS NULL OR sa.expires_at > now()))
+     OR EXISTS (
+         SELECT 1 FROM document_share_settings sl
+         WHERE sl.document_id = d.id AND sl.link_role IS NOT NULL
+           AND (sl.link_expires_at IS NULL OR sl.link_expires_at > now())))";
 
-/// No `Debug`: the title is personal data and must not reach logs.
+/// Columns of [`DocumentRow`] over [`FROM`].
+pub(crate) fn columns() -> String {
+    format!(
+        "d.id, d.owner_id, d.folder_id, d.title, d.kind, d.mime, d.state, d.etag,
+         d.trashed_at, d.created_at, d.updated_at, v.seq AS version, v.bytes AS size,
+         o.display_name AS owner_name, {SHARED} AS shared"
+    )
+}
+
+/// A document `d` with its current version `v` and owner `o`; drafts (no version yet) never match.
+pub(crate) const FROM: &str = "documents d
+     JOIN document_versions v ON v.id = d.current_version_id
+     JOIN actors o ON o.id = d.owner_id";
+
+fn select() -> String {
+    format!("SELECT {} FROM {FROM}", columns())
+}
+
+/// No `Debug`: the title and the owner's name are personal data and must not reach logs.
 #[derive(Clone, sqlx::FromRow)]
 pub struct DocumentRow {
     pub id: Uuid,
@@ -27,38 +49,15 @@ pub struct DocumentRow {
     pub updated_at: OffsetDateTime,
     pub version: i32,
     pub size: i64,
+    pub owner_name: String,
+    pub shared: bool,
 }
 
 pub async fn get(db: impl PgExecutor<'_>, id: Uuid) -> Result<Option<DocumentRow>, sqlx::Error> {
-    sqlx::query_as(&format!("{SELECT} WHERE d.id = $1"))
+    sqlx::query_as(&format!("{} WHERE d.id = $1", select()))
         .bind(id)
         .fetch_optional(db)
         .await
-}
-
-/// What a save needs to decide, read with the document row locked until the transaction ends.
-#[derive(Clone, Debug, sqlx::FromRow)]
-pub struct SaveTarget {
-    pub owner_id: String,
-    #[sqlx(try_from = "String")]
-    pub state: ItemState,
-    pub etag: String,
-    pub version: i32,
-}
-
-pub async fn lock_for_save(
-    conn: &mut PgConnection,
-    id: Uuid,
-) -> Result<Option<SaveTarget>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT d.owner_id, d.state, d.etag, v.seq AS version
-         FROM documents d JOIN document_versions v ON v.id = d.current_version_id
-         WHERE d.id = $1
-         FOR UPDATE OF d",
-    )
-    .bind(id)
-    .fetch_optional(conn)
-    .await
 }
 
 pub async fn sort_key(
@@ -82,11 +81,12 @@ pub async fn list_in_folder(
     limit: i64,
 ) -> Result<Vec<DocumentRow>, sqlx::Error> {
     sqlx::query_as(&format!(
-        "{SELECT}
+        "{}
          WHERE d.owner_id = $1 AND d.folder_id IS NOT DISTINCT FROM $2 AND d.state = 'ACTIVE'
            AND ($3::text IS NULL OR (lower(d.title), d.id) > ($3::text, $4::uuid))
          ORDER BY lower(d.title), d.id
-         LIMIT $5"
+         LIMIT $5",
+        select()
     ))
     .bind(owner_id)
     .bind(folder)
@@ -106,7 +106,7 @@ pub async fn list_trash(
     limit: i64,
 ) -> Result<Vec<DocumentRow>, sqlx::Error> {
     sqlx::query_as(&format!(
-        "{SELECT}
+        "{}
          WHERE d.owner_id = $1 AND d.state = 'TRASHED'
            AND NOT EXISTS (
                SELECT 1 FROM folders p
@@ -114,7 +114,8 @@ pub async fn list_trash(
            AND ($2::timestamptz IS NULL OR d.trashed_at < $2
                 OR (d.trashed_at = $2 AND ($3 < 1 OR ($3 = 1 AND d.id > $4))))
          ORDER BY d.trashed_at DESC, d.id
-         LIMIT $5"
+         LIMIT $5",
+        select()
     ))
     .bind(owner_id)
     .bind(after.map(|a| a.0))

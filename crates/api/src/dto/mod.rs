@@ -1,6 +1,11 @@
 //! Response bodies of the contract (`Folder`, `Document`, `Version` and the listings).
+mod sharing;
+
 use office_documents::{Document, Entries, Folder, FolderPath, Page, Version};
 use serde::Serialize;
+pub(crate) use sharing::{
+    AddedPermissionsDto, LinkCreatedDto, PermissionDto, PermissionsDto, ShareSettingsDto, SharedDto,
+};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -66,6 +71,11 @@ pub(crate) struct DocumentDto<'a> {
     created_at: OffsetDateTime,
     #[serde(serialize_with = "time::serde::rfc3339::serialize")]
     updated_at: OffsetDateTime,
+    role: &'static str,
+    owner_name: &'a str,
+    shared: bool,
+    can_download: bool,
+    can_share: bool,
 }
 
 impl<'a> From<&'a Document> for DocumentDto<'a> {
@@ -83,6 +93,11 @@ impl<'a> From<&'a Document> for DocumentDto<'a> {
             trashed_at: d.trashed_at,
             created_at: d.created_at,
             updated_at: d.updated_at,
+            role: d.role.as_str(),
+            owner_name: &d.owner_name,
+            shared: d.shared,
+            can_download: d.can_download,
+            can_share: d.can_share,
         }
     }
 }

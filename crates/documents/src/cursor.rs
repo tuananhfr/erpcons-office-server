@@ -82,6 +82,35 @@ impl TrashCursor {
     }
 }
 
+/// Where "Shared with me" resumes: after the permission `id` made at `shared_at`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SharedCursor {
+    pub shared_at: OffsetDateTime,
+    pub id: Uuid,
+}
+
+impl SharedCursor {
+    pub fn encode(self) -> String {
+        let micros = self.shared_at.unix_timestamp_nanos() / 1000;
+        encode(&format!("s1:{micros}:{}", self.id))
+    }
+
+    pub fn decode(cursor: &str) -> Result<Self, DocError> {
+        let text = decode(cursor)?;
+        let (micros, id) = match text.split(':').collect::<Vec<_>>().as_slice() {
+            ["s1", micros, id] => (*micros, *id),
+            _ => return Err(DocError::InvalidRequest),
+        };
+        let micros: i128 = micros.parse().map_err(|_| DocError::InvalidRequest)?;
+        let nanos = micros.checked_mul(1000).ok_or(DocError::InvalidRequest)?;
+        Ok(Self {
+            shared_at: OffsetDateTime::from_unix_timestamp_nanos(nanos)
+                .map_err(|_| DocError::InvalidRequest)?,
+            id: uuid(id)?,
+        })
+    }
+}
+
 /// Versions resume below this `seq`.
 pub fn encode_version(seq: i32) -> String {
     encode(&format!("v1:{seq}"))
@@ -114,6 +143,11 @@ mod tests {
         };
         assert_eq!(TrashCursor::decode(&t.encode()), Ok(t));
         assert_eq!(decode_version(&encode_version(7)), Ok(7));
+        let s = SharedCursor {
+            shared_at: t.trashed_at,
+            id,
+        };
+        assert_eq!(SharedCursor::decode(&s.encode()), Ok(s));
     }
 
     #[test]
@@ -122,6 +156,7 @@ mod tests {
             assert_eq!(ChildrenCursor::decode(bad), Err(DocError::InvalidRequest));
             assert_eq!(TrashCursor::decode(bad), Err(DocError::InvalidRequest));
             assert_eq!(decode_version(bad), Err(DocError::InvalidRequest));
+            assert_eq!(SharedCursor::decode(bad), Err(DocError::InvalidRequest));
         }
     }
 }

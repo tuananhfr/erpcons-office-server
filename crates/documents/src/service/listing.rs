@@ -4,7 +4,7 @@ use office_db::{documents, folders, versions};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::{Caller, Documents, documents::owned_document, folders::active_folder};
+use super::{Caller, Documents, access, folders::active_folder};
 use crate::{
     Action, DocError, Document, Entries, Folder, Page, PageRequest, Version,
     cursor::{self, ChildrenCursor, TrashCursor},
@@ -32,7 +32,7 @@ impl Documents {
         let mut folder_rows = Vec::new();
         let doc_after = match cursor {
             Some(ChildrenCursor::Document(id)) => {
-                let key = documents::sort_key(db, c.owner(), id)
+                let key = documents::sort_key(db, c.actor_id(), id)
                     .await
                     .map_err(DocError::db)?
                     .ok_or(DocError::InvalidRequest)?;
@@ -41,7 +41,7 @@ impl Documents {
             folder_cursor => {
                 let after = match folder_cursor {
                     Some(ChildrenCursor::Folder(id)) => {
-                        let key = folders::sort_key(db, c.owner(), id)
+                        let key = folders::sort_key(db, c.actor_id(), id)
                             .await
                             .map_err(DocError::db)?
                             .ok_or(DocError::InvalidRequest)?;
@@ -50,7 +50,7 @@ impl Documents {
                     _ => None,
                 };
                 let after_ref = after.as_ref().map(|(k, id)| (k.as_str(), *id));
-                folder_rows = folders::list_children(db, c.owner(), folder, after_ref, fetch)
+                folder_rows = folders::list_children(db, c.actor_id(), folder, after_ref, fetch)
                     .await
                     .map_err(DocError::db)?;
                 if folder_rows.len() > limit {
@@ -71,7 +71,7 @@ impl Documents {
         let after_ref = doc_after.as_ref().map(|(k, id)| (k.as_str(), *id));
         let mut doc_rows = documents::list_in_folder(
             db,
-            c.owner(),
+            c.actor_id(),
             folder,
             after_ref,
             i64::try_from(room).unwrap_or(i64::MAX) + 1,
@@ -115,10 +115,10 @@ impl Documents {
             .map(TrashCursor::decode)
             .transpose()?
             .map(|t| (t.trashed_at, t.rank, t.id));
-        let folder_rows = folders::list_trash(&self.db, c.owner(), after, fetch)
+        let folder_rows = folders::list_trash(&self.db, c.actor_id(), after, fetch)
             .await
             .map_err(DocError::db)?;
-        let doc_rows = documents::list_trash(&self.db, c.owner(), after, fetch)
+        let doc_rows = documents::list_trash(&self.db, c.actor_id(), after, fetch)
             .await
             .map_err(DocError::db)?;
         let mut merged: Vec<TrashItem> = folder_rows
@@ -160,7 +160,7 @@ impl Documents {
         id: Uuid,
         page: &PageRequest,
     ) -> Result<Page<Vec<Version>>, DocError> {
-        owned_document(&self.db, c, id, Action::Read).await?;
+        access::load(&self.db, c, id, Action::ReadVersions).await?;
         let limit = usize::try_from(page.limit).unwrap_or(usize::MAX);
         let before = page
             .cursor

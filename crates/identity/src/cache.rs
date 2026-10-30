@@ -80,6 +80,7 @@ mod tests {
         Actor {
             actor_id: "usr_1".into(),
             display_name: "An".into(),
+            email: crate::EmailClaim::Unknown,
             expires_at: OffsetDateTime::UNIX_EPOCH,
         }
     }

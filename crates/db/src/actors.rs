@@ -20,3 +20,14 @@ pub async fn upsert_seen(
     .fetch_one(db)
     .await
 }
+
+/// Locks the row of `actor_id` until the transaction ends, serializing the quota checks of that owner.
+/// `NO KEY UPDATE`, not `UPDATE`: the foreign-key checks of rows naming this actor (`FOR KEY SHARE`)
+/// must not wait for it, or a share holding a document row and a save holding the owner deadlock.
+pub async fn lock(conn: &mut sqlx::PgConnection, actor_id: &str) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT true FROM actors WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(actor_id)
+        .fetch_optional(conn)
+        .await
+        .map(|row: Option<bool>| row.is_some())
+}

@@ -21,6 +21,13 @@ const NOW: OrphanConfig = OrphanConfig {
     page: 2,
 };
 
+/// The smallest age the server accepts (`ERPCONS_ORPHAN_MIN_AGE_SECS`). With `NOW`, a sweep may
+/// delete what a concurrent save has put but not yet committed, which production rules out.
+const SMALLEST_ALLOWED: OrphanConfig = OrphanConfig {
+    min_age: Duration::from_secs(60),
+    page: 2,
+};
+
 fn id(v: &Value) -> &str {
     v["id"].as_str().expect("id")
 }
@@ -313,13 +320,17 @@ async fn purge_and_sweep_running_with_saves_lose_nothing() {
         let save = app.put_content(&token, id(&doc), Some(&tag), docx(&format!("s{n}")));
         let documents = app.documents().clone();
         let jobs = async move {
-            documents.sweep_orphans(&NOW).await.expect("sweep");
+            documents
+                .sweep_orphans(&SMALLEST_ALLOWED)
+                .await
+                .expect("sweep");
             documents
                 .purge(&PurgeConfig::default())
                 .await
                 .expect("purge");
         };
         let (response, ()) = tokio::join!(save, jobs);
+        assert_eq!(response.status(), 200, "save {n}");
         tag = crate::support::etag(&response);
         assert_eq!(ok_json(response, 200).await["version"], n + 2);
         let content = app

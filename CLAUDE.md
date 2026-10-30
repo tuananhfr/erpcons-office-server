@@ -1,7 +1,8 @@
 # CLAUDE.md
 
 Backend of the ERPCons Office online tier (`/api/v1`). Read `README.md` for layout and configuration; the API contract
-is `docs/openapi.yaml`. The approved plan is `erpcons-workspace/tmp/briefs/office-online-v1/plan.md`.
+is `docs/openapi.yaml`. The approved plans are `erpcons-workspace/tmp/briefs/office-online-v1/plan.md` (phase 1) and
+`tmp/briefs/office-online-v2/plan.md` (phase 2: versions, sharing).
 
 ## Commands
 
@@ -20,14 +21,24 @@ is `docs/openapi.yaml`. The approved plan is `erpcons-workspace/tmp/briefs/offic
 - **Auth is local**: `JwtVerifier` checks PI's EdDSA access tokens against PI's JWKS (`alg`, `typ`, signature, `iss`,
   `exp`/`nbf`/`iat`, `aud`, `azp` allow list, `sub`); never relax a check to make a token pass. `actor_id` = PI `sub`.
   A request never fails because PI's userinfo (display name) is down.
-- **404, never 403**: anything the caller may not see answers `NOT_FOUND`. Every access decision goes through
-  `office_documents::authorize`.
+- **404 unless visible**: anything the caller may not see (no role, or a document its owner trashed) answers
+  `NOT_FOUND`; only a caller who can see a document but whose role does not allow the action gets 403 `FORBIDDEN`.
+  Every access decision goes through `office_documents::authorize`, with the role read from the database on every
+  request (no cache). Quota and locks of a shared document are its owner's, never the caller's.
+- **Emails and link tokens are PII/secrets**: emails live only in `actor_emails`, `document_acl` and `mail_outbox`;
+  link tokens as sha256 (lookups) plus a copy sealed with AES-256-GCM under `ERPCONS_LINK_KEY` (shown to sharers
+  again), never in the clear. Neither reaches logs or audit rows.
 - **Durable write order** (plan §4): temp file, fsync, verify sha256, rename, DB transaction (version +
   `current_version_id` + `etag`), commit, then 200. Never report success before the commit. A request that fails
   after its put calls `Documents::discard` (deletes the bytes under `locks::object` unless deduplicated or referenced);
   the orphan sweep only backs up crashes.
-- **Lock order** in a transaction: actor row, then `locks::tree` (owner), then `locks::object` (sha256), then document
-  rows. A mutation writes its audit row inside its own transaction.
+- **Deleting a version** (owner, never the current one) removes its row; its object becomes `DELETE_PENDING` only
+  when no live version uses it, and the request deletes the bytes after the commit, else the purge job does. The
+  comment in migration 0001 ("only a purge may delete them") predates this.
+- **Lock order** in a transaction: actor row (the document owner's), then `locks::tree` (owner), then
+  `locks::object` (sha256), then document rows, then `locks::recipients` (the sharer's new-address cap), then
+  `locks::mail_caps` (the invite mail caps). A mutation writes its
+  audit row inside its own transaction.
 - **Intake rules are shared with the site**: change `crates/documents/tests/intake_vectors.json` together with the
   site's `intake-contract.ts`; the vector test fails when they drift.
 - Fail points (`FailPoint`) exist for tests only (`testing` feature); never arm them elsewhere.

@@ -5,9 +5,8 @@ use tracing::error;
 use uuid::Uuid;
 
 use super::{
-    Caller, Documents,
+    Caller, Documents, access,
     audit::{self, Subject},
-    documents::owned_document,
     folders::owned_folder,
 };
 use crate::{Action, DocError};
@@ -23,19 +22,22 @@ impl Documents {
 
     async fn purge_document_inner(&self, c: &Caller<'_>, id: Uuid) -> Result<(), DocError> {
         let mut tx = self.begin().await?;
-        locks::tree(&mut tx, c.owner())
+        locks::tree(&mut tx, c.actor_id())
             .await
             .map_err(DocError::db)?;
-        let row = owned_document(&mut *tx, c, id, Action::Purge).await?;
+        let row = access::load(&mut *tx, c, id, Action::Purge).await?.row;
         if row.state != ItemState::Trashed {
             return Err(DocError::NotFound);
         }
-        let marked = purge::mark_pending(&mut *tx, c.owner(), &[id])
+        let marked = purge::mark_pending(&mut *tx, c.actor_id(), &[id])
             .await
             .map_err(DocError::db)?;
         if marked.is_empty() {
             return Err(DocError::NotFound);
         }
+        purge::forget_sharing(&mut tx, Some(&marked))
+            .await
+            .map_err(DocError::db)?;
         audit::success(&mut tx, c, "document.purge", Subject::Document(id)).await?;
         tx.commit().await.map_err(DocError::db)?;
         self.release_purged(&marked).await;
@@ -52,17 +54,20 @@ impl Documents {
 
     async fn purge_folder_inner(&self, c: &Caller<'_>, id: Uuid) -> Result<(), DocError> {
         let mut tx = self.begin().await?;
-        locks::tree(&mut tx, c.owner())
+        locks::tree(&mut tx, c.actor_id())
             .await
             .map_err(DocError::db)?;
         let row = owned_folder(&mut *tx, c, id, Action::Purge).await?;
         if row.state != ItemState::Trashed {
             return Err(DocError::NotFound);
         }
-        let removed = purge::purge_folder_tree(&mut tx, c.owner(), id)
+        let removed = purge::purge_folder_tree(&mut tx, c.actor_id(), id)
             .await
             .map_err(DocError::db)?
             .ok_or(DocError::NotFound)?;
+        purge::forget_sharing(&mut tx, Some(&removed.documents))
+            .await
+            .map_err(DocError::db)?;
         audit::success(&mut tx, c, "folder.purge", Subject::Folder(id)).await?;
         for doc in &removed.documents {
             audit::success(&mut tx, c, "document.purge", Subject::Document(*doc)).await?;

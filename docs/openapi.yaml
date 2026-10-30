@@ -1,22 +1,59 @@
 openapi: 3.1.0
 info:
   title: ERPCons Office Online API
-  version: 0.1.0-draft
+  version: 0.2.0-draft
   description: |
-    Phase 0–1 of the online tier (ERPCONS OFFICE ONLINE V3.0 §05, §07, §08): documents, folders, immutable versions,
-    trash, quota. Served on the site's origin under `/api/v1`, so browsers need no CORS.
+    Phases 0–2 of the online tier (ERPCONS OFFICE ONLINE V3.0 §05, §07, §08): documents, folders, immutable versions
+    and their restore, trash, quota, and sharing (people by email, a public view link, "Shared with me"). Served on the
+    site's origin under `/api/v1`, so browsers need no CORS.
 
-    **Authentication.** Every operation except `/health` takes the user's PI ID access token as
+    **Authentication.** Every operation except `/health` and the two `/link` operations takes the user's PI ID access token as
     `Authorization: Bearer`. The server verifies it locally and resolves it to an actor (`actor_id` = PI `sub`): an
     EdDSA JWT (`typ: JWT`) signed by a key in PI's JWKS, with the configured issuer, an unexpired `exp` (and `nbf`/`iat`
     not in the future), an `aud` naming `pi-platform` and an `azp` among Office's clients (by default
     `erpcons-office-web`). A token that fails any check answers 401 `UNAUTHENTICATED`; 503 `UNAVAILABLE` (retryable)
     only when PI's keys cannot be fetched (none cached yet, or a new `kid` while PI is down). A locked PI account keeps
     working until its access token expires (PI: 10 min). The display name comes from PI's userinfo and may be empty
-    when PI cannot be asked.
+    when PI cannot be asked. When PI's userinfo reports a verified email (`email_verified: true`), the server records
+    it and gives the account the invitations waiting for that address. When PI later reports the email unverified or a
+    different one, the record is dropped or replaced; permissions the account already took stay. A userinfo answer
+    without an email (scope missing, PI unreachable) neither drops nor renews the record.
 
-    **Authorization.** Phase 1: only the owner can see or change a document or folder. Anything the caller may not see
-    answers 404, never 403, so existence is not revealed (§08).
+    **Authorization.** Folders are private to their owner. A document has one owner and may be shared (phase 2,
+    Google Docs model): the caller's `role` on it is `owner`, `editor`, `commenter` or `viewer` (granted by email), or
+    `link` (anyone holding the public view link, see `openLink`). Access is read from the database on every request,
+    so a removed permission is refused at the next request. Anything the caller cannot see (no role, or a document
+    its owner trashed, for anyone but the owner) answers 404 `NOT_FOUND`, so existence is not revealed (§08). A caller
+    who can see the document but asks for something its role does not allow gets 403 `FORBIDDEN`:
+
+    | Operation | owner | editor | commenter | viewer |
+    |---|---|---|---|---|
+    | `getDocument`, `getContent`, `listPermissions` (commenter, viewer: owner and self only) | ✓ | ✓ | ✓ | ✓ |
+    | `saveContent`, `restoreVersion`, `listVersions`, `getVersionContent`, rename (`updateDocument` with `title` only) | ✓ | ✓ | | |
+    | `deleteVersion` | ✓ | | | |
+    | `addPermissions`, `updatePermission`, `removePermission`, `enableLink`, `disableLink` | ✓ | ✓ if `editors_can_share` | | |
+    | `removePermission` of one's own permission (leave) | | ✓ | ✓ | ✓ |
+    | `updatePermission` with `expires_at` (set, change or clear an expiry) | ✓ | | | |
+    | `removePermission` of someone else's permission or invitation with `expires_at` set | ✓ | | | |
+    | `putShareSettings`, move (`updateDocument` with `folder_id`), trash, restore, purge | ✓ | | | |
+
+    Nobody changes their own permission with `updatePermission` (403); leaving with `removePermission` stays open.
+    Roles granted are at most `editor`. When an editor shares again with someone who already has a permission, the
+    role changes but the owner's expiry stays; an expired permission can be granted again only by the owner (403).
+
+    **Expiries are the owner's.** Only the owner sets, changes or clears an `expires_at`, on a permission or on the
+    link. A sharer whose own permission has an `expires_at` hands out nothing that lasts longer: every permission,
+    invitation and link it creates, and every role it raises, ends no later than its own permission (a request with
+    no end, or a later one, gets the sharer's end). Lowering a role keeps the expiry it had.
+
+    **Bounds.** A document holds at most 500 permissions and pending invitations together; `addPermissions` past that
+    answers 422 `TOO_MANY_PERMISSIONS`. One account may share with at most 200 addresses it has not shared with before
+    per rolling 24 h, across documents and with or without `notify` (429 `RATE_LIMITED`, `Retry-After`).
+
+    Downloading, printing and copying are client features: the server serves the bytes to every role (they are
+    needed to show the document), and `Document.can_download` tells the client whether to offer them. Saves and
+    restores by an editor count against the owner's quota. A copy a recipient saves is a new upload into the
+    recipient's own folders (folders are never shared).
 
     **Errors** share one body (`Error`). `message_vi` is ready to show; clients branch on `code` only. A malformed
     body, path or query answers 422 `INVALID_REQUEST`, a body over the limit 413 `TOO_LARGE`, a method a path does not
@@ -35,9 +72,22 @@ info:
     and body within 24 h returns the first response, a repeat with a different body answers 422
     `IDEMPOTENCY_MISMATCH`, a repeat while the first is still running 503 `UNAVAILABLE` (retryable). Restore, trash and save need no key: repeating them
     is harmless (restoring an active item returns it, trashing a trashed one is a no-op, a repeated save answers the
-    version it made, see `saveContent`).
+    version it made, see `saveContent`). Sharing needs no key either: adding a permission someone already has with the
+    same role changes nothing and sends no second email.
 
-    **Logging.** The server never logs titles, folder names, bytes or tokens.
+    **Email.** When SMTP is configured, `addPermissions` with `notify` queues an email ("shared with you", in
+    Vietnamese, with the sharer's name (cut to 60 characters in the subject) and verified email, the optional message
+    and a link to the document); it is sent in the background with retries for up to 24 h and never delays or fails
+    the request. The message is marked as written by the sharer, not by ERPCons Office, and any URL in it is defanged
+    (`hxxps://example[.]com`), so it carries no live link. The document title is in the email only when the server is
+    configured to include it. Without SMTP the recipient only finds the document in "Shared with me". An email is
+    queued only when PI currently reports a verified email for the sharer, and within these rolling 24 h caps: per
+    sharer (configured, default 100), per recipient address (10, whoever sends them) and for the whole server
+    (configured, default 2000). Past any of them the sharing still succeeds and appears in "Shared with me", but no
+    email is queued, and `mail_skipped` counts them.
+
+    **Logging.** The server never logs titles, folder names, bytes, emails, link tokens or access tokens; audit rows
+    hold ids only (a view through the public link has actor kind `link` and no token).
 servers:
   - url: /api/v1
 security:
@@ -49,6 +99,8 @@ tags:
     description: Folder tree of one owner.
   - name: documents
     description: Documents, their versions and the trash.
+  - name: sharing
+    description: Permissions by email, share settings, the public view link and "Shared with me".
   - name: ops
     description: Operations endpoints.
 paths:
@@ -291,6 +343,7 @@ paths:
       operationId: updateDocument
       tags: [documents]
       summary: Rename or move to another folder (does not create a version)
+      description: Renaming is for the owner and editors; moving (any `folder_id`) only for the owner, into one of the owner's folders.
       requestBody:
         required: true
         content:
@@ -308,15 +361,17 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Document' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '422': { $ref: '#/components/responses/Unprocessable' }
     delete:
       operationId: trashDocument
-      summary: Move a document to the trash
+      summary: Move a document to the trash (owner only); people it is shared with stop seeing it
       tags: [documents]
       responses:
         '204': { description: Trashed. }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
   /documents/{document_id}/restore:
     parameters:
@@ -400,18 +455,9 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Document' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '409':
-          description: '`VERSION_CONFLICT`: the current version is not the one in `If-Match`.'
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/Error'
-                  - type: object
-                    required: [latest_version]
-                    properties:
-                      latest_version: { type: integer, minimum: 1 }
+        '409': { $ref: '#/components/responses/VersionConflict' }
         '413': { $ref: '#/components/responses/TooLarge' }
         '422': { $ref: '#/components/responses/Unprocessable' }
         '428': { $ref: '#/components/responses/PreconditionRequired' }
@@ -423,7 +469,7 @@ paths:
     get:
       operationId: listVersions
       tags: [documents]
-      summary: Versions, newest first (restore comes in phase 2)
+      summary: Versions, newest first (owner and editors)
       parameters:
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Limit'
@@ -441,7 +487,363 @@ paths:
                     items: { $ref: '#/components/schemas/Version' }
                   next_cursor: { type: [string, 'null'] }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /documents/{document_id}/versions/{seq}:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/Seq'
+    delete:
+      operationId: deleteVersion
+      tags: [documents]
+      summary: Delete an old version for good (owner only)
+      description: |
+        The version leaves the history; its number is never given to another version, and its content and restore
+        answer 404 from then on. The current version cannot be deleted (409 `VERSION_IS_CURRENT`); a trashed document
+        answers 404. The bytes are deleted, and stop counting against the owner's quota, only when no other version
+        uses the same content (a restored version shares the bytes of the one it restored); otherwise only the version
+        goes and the quota does not change. A version already deleted answers 404.
+      responses:
+        '204': { description: Deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`VERSION_IS_CURRENT`: the current version cannot be deleted; restore or save another first.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /documents/{document_id}/versions/{seq}/content:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/Seq'
+    get:
+      operationId: getVersionContent
+      tags: [documents]
+      summary: Bytes of one version (owner and editors)
+      description: Any version of the document, the current one included. A `seq` the document does not have answers 404.
+      responses:
+        '200':
+          description: The file as it was saved in that version.
+          headers:
+            X-Document-Version: { $ref: '#/components/headers/X-Document-Version' }
+          content:
+            application/octet-stream:
+              schema: { type: string, contentMediaType: application/octet-stream }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /documents/{document_id}/versions/{seq}/restore:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/Seq'
+    post:
+      operationId: restoreVersion
+      tags: [documents]
+      summary: Make an older version current again, as a new version (owner and editors)
+      description: |
+        Adds version `latest + 1` whose bytes are those of version `seq`: no bytes are copied and the quota does not
+        change; every version stays in the history (until the owner deletes it, see `deleteVersion`). Like a save it names the current version in `If-Match`; any other
+        answers 409 `VERSION_CONFLICT` with `latest_version`. A trashed document answers 404. The new version's author
+        is the caller. 200 means durable. Repeating a restore whose answer was lost answers 409 (the client reloads).
+      parameters:
+        - name: If-Match
+          in: header
+          required: true
+          description: ETag of the current version. Missing answers 428 `PRECONDITION_REQUIRED`.
+          schema: { type: string }
+      responses:
+        '200':
+          description: Restored; the document now points at the new version.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Document' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/VersionConflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '428': { $ref: '#/components/responses/PreconditionRequired' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /documents/{document_id}/permissions:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    get:
+      operationId: listPermissions
+      tags: [sharing]
+      summary: Who has access, the share settings and the link state (the share dialog)
+      description: |
+        The owner and editors see every permission, pending invitations included; commenters and viewers see only
+        their own (`permissions` holds one item). Expired and removed permissions are not listed.
+      responses:
+        '200':
+          description: The document's sharing.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Permissions' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      operationId: addPermissions
+      tags: [sharing]
+      summary: Share with people by email (owner; editors when `editors_can_share`)
+      description: |
+        Each address is trimmed, NFC-normalized and lowercased. The address of an account whose PI confirmed that
+        verified email within the last 30 days gets the permission at once; any other becomes a pending invitation,
+        given to the account that next signs in with that verified email (it replaces an expired permission of that
+        account). Someone who already has a permission gets `role` instead (no
+        second permission). The owner's and the caller's own addresses are skipped. With `notify`, an email is queued
+        for each permission added or whose role changed (see **Email**), unless the caller has reached its daily cap.
+        Answers the updated sharing, as `listPermissions`, and how many emails the cap held back. A caller other than
+        the owner keeps an existing expiry when changing a role, and gets 403 `FORBIDDEN` for a permission that has
+        expired (granting it again would undo the owner's expiry). A caller with an expiry of its own passes it on
+        (see **Expiries are the owner's**). 422 `TOO_MANY_PERMISSIONS` past 500 per document, 429 `RATE_LIMITED`
+        past 200 new addresses per caller and day (see **Bounds**); neither keeps any of the request. In the rare case
+        that a sign-in of one of the invited people races this request twice in a row, nothing of the request is kept
+        and it answers 503 `UNAVAILABLE` (retryable, with `Retry-After`): send the same request again.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [emails, role, notify]
+              properties:
+                emails:
+                  type: array
+                  minItems: 1
+                  maxItems: 50
+                  items: { $ref: '#/components/schemas/Email' }
+                role: { $ref: '#/components/schemas/GrantRole' }
+                notify: { type: boolean }
+                message:
+                  type: [string, 'null']
+                  maxLength: 1000
+                  description: Put into the email; ignored without `notify`. No control characters other than line breaks and tabs.
+      responses:
+        '200':
+          description: Shared.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PermissionsAdded' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503':
+          description: '`UNAVAILABLE` (retryable), with `Retry-After`: nothing was kept; send the same request again.'
+          headers:
+            Retry-After:
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /documents/{document_id}/permissions/{permission_id}:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+      - name: permission_id
+        in: path
+        required: true
+        schema: { $ref: '#/components/schemas/Id' }
+    patch:
+      operationId: updatePermission
+      tags: [sharing]
+      summary: Change a permission's role or expiry (owner; editors when `editors_can_share`, role only)
+      description: |
+        403 `FORBIDDEN` when the permission is the caller's own, or when a caller other than the owner sends
+        `expires_at` (expiries are the owner's to set, change or clear). Editors may change the role of others; a
+        raised role ends no later than the caller's own permission.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                role: { $ref: '#/components/schemas/GrantRole' }
+                expires_at:
+                  type: [string, 'null']
+                  format: date-time
+                  description: Must be in the future; `null` removes the expiry.
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Permission' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+    delete:
+      operationId: removePermission
+      tags: [sharing]
+      summary: Remove a permission or a pending invitation; anyone may remove their own (leave the document)
+      description: |
+        Takes effect at the next request of the person removed. A permission already gone answers 404. A permission or
+        pending invitation with `expires_at` set may be removed only by the owner or by the person it belongs to
+        (leaving); others get 403 `FORBIDDEN`, since removing and inviting again would lift the owner's expiry.
+      responses:
+        '204': { description: Removed. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /documents/{document_id}/share-settings:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    put:
+      operationId: putShareSettings
+      tags: [sharing]
+      summary: The two switches of the share dialog's gear (owner only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ShareSettings' }
+      responses:
+        '200':
+          description: Saved.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShareSettings' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /documents/{document_id}/link:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    put:
+      operationId: enableLink
+      tags: [sharing]
+      summary: Turn on "anyone with the link can view" and get the link token (owner; editors when `editors_can_share`)
+      description: |
+        Returns the link's 256-bit token. While the link is already on, the token stays the same, so calling it again
+        is harmless. A new token, which stops the previous link, takes `disableLink` then `enableLink`. The token is
+        also in `LinkState.token` for those who may share. The body may be omitted. The site builds the link as
+        `/<editor>/#link=<token>`: in the fragment, which browsers send to no server and put in no `Referer`.
+        503 `UNAVAILABLE` when the server has no link key.
+
+        Expiry. The owner sets it from this body (absent or `null`: no end), also on a link that is on. Anyone else
+        gets 403 `FORBIDDEN` when asking a link that is on for an `expires_at` other than its current one (omit it to
+        fetch the link as it is); a new link of theirs ends no later than their own permission.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                expires_at:
+                  type: [string, 'null']
+                  format: date-time
+                  description: Must be in the future; absent or `null` means no expiry.
+      responses:
+        '200':
+          description: The link is on.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LinkCreated' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    delete:
+      operationId: disableLink
+      tags: [sharing]
+      summary: Turn the public link off (owner; editors when `editors_can_share`); a no-op when already off
+      description: Only the owner turns off a link with `expires_at` (403 `FORBIDDEN` for others), since turning it on again would drop the end.
+      responses:
+        '204': { description: Off. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /shared:
+    get:
+      operationId: listShared
+      tags: [sharing]
+      summary: '"Shared with me": documents other people shared with the caller, most recently shared first'
+      description: Only active documents and permissions in force; a document its owner trashed leaves the list.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: One page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [documents, unseen, next_cursor]
+                properties:
+                  documents:
+                    type: array
+                    items: { $ref: '#/components/schemas/SharedDocument' }
+                  unseen:
+                    type: integer
+                    minimum: 0
+                    description: How many of all the caller's shared documents (not only this page) are still `new`.
+                  next_cursor: { type: [string, 'null'] }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /shared/{document_id}/seen:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    post:
+      operationId: markSharedSeen
+      tags: [sharing]
+      summary: Clear the `new` mark of a document shared with the caller
+      responses:
+        '204': { description: Marked; also when it already was. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /link:
+    parameters:
+      - $ref: '#/components/parameters/LinkToken'
+    get:
+      operationId: openLink
+      tags: [sharing]
+      security: []
+      summary: The document behind a public view link, without signing in
+      description: |
+        `role` is `link`. The token travels in the `X-Link-Token` header, never in the URL, so no access log, proxy or
+        `Referer` holds it; the site reads it from its page's fragment (`#link=<token>`). A missing header or a token
+        that is unknown, replaced, turned off or expired, or whose document is trashed or purged, answers 404. Limited
+        per client address (429 `RATE_LIMITED`). Answers carry `Referrer-Policy: no-referrer`. Each view is audited
+        without the token.
+      responses:
+        '200':
+          description: The document.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Document' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /link/content:
+    parameters:
+      - $ref: '#/components/parameters/LinkToken'
+    get:
+      operationId: getLinkContent
+      tags: [sharing]
+      security: []
+      summary: Bytes of the current version behind a public view link, without signing in (token as in `openLink`)
+      responses:
+        '200':
+          description: The file.
+          headers:
+            X-Document-Version: { $ref: '#/components/headers/X-Document-Version' }
+          content:
+            application/octet-stream:
+              schema: { type: string, contentMediaType: application/octet-stream }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
   /trash:
     get:
       operationId: listTrash
@@ -497,6 +899,18 @@ components:
       in: header
       required: true
       schema: { type: string, minLength: 1, maxLength: 100 }
+    Seq:
+      name: seq
+      in: path
+      required: true
+      description: A version's `version` number.
+      schema: { type: integer, minimum: 1 }
+    LinkToken:
+      name: X-Link-Token
+      in: header
+      required: true
+      description: The token `enableLink` returned (43 characters of base64url). Never logged.
+      schema: { type: string, pattern: '^[A-Za-z0-9_-]{43}$' }
   headers:
     ETag:
       description: Opaque, strong; changes with every version.
@@ -557,12 +971,28 @@ components:
           type: array
           description: From the top-level folder down to the direct parent; empty for a top-level folder. The root is not listed.
           items: { $ref: '#/components/schemas/Folder' }
+    Role:
+      type: string
+      enum: [owner, editor, commenter, viewer, link]
+      description: |
+        The caller's role on a document. Shells map owner and editor to edit mode, commenter to comment mode, viewer
+        and link to view mode.
+    GrantRole:
+      type: string
+      enum: [editor, commenter, viewer]
+    Email:
+      type: string
+      minLength: 3
+      maxLength: 254
+      description: One `@` with a non-empty part on each side and a dot in the domain; no spaces or control characters.
     Document:
       type: object
-      required: [id, folder_id, title, kind, format, size, version, save_state, state, created_at, updated_at]
+      required: [id, folder_id, title, kind, format, size, version, save_state, state, created_at, updated_at, role, owner_name, shared, can_download, can_share]
       properties:
         id: { $ref: '#/components/schemas/Id' }
-        folder_id: { oneOf: [{ $ref: '#/components/schemas/Id' }, { type: 'null' }] }
+        folder_id:
+          oneOf: [{ $ref: '#/components/schemas/Id' }, { type: 'null' }]
+          description: The owner's folder; always `null` for anyone but the owner.
         title: { $ref: '#/components/schemas/Name' }
         kind: { $ref: '#/components/schemas/Kind' }
         format: { type: string, enum: [docx, xlsx, pptx, pdf] }
@@ -573,6 +1003,112 @@ components:
         trashed_at: { type: [string, 'null'], format: date-time }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+        role: { $ref: '#/components/schemas/Role' }
+        owner_name: { type: string, description: The owner's display name (may be empty when PI could not be asked). }
+        shared:
+          type: boolean
+          description: At least one permission or pending invitation is in force, or the public link is on.
+        can_download:
+          type: boolean
+          description: Whether the client offers download, print and copy. Always true for owner and editors; for the other roles the owner's `viewers_can_download`.
+        can_share:
+          type: boolean
+          description: >-
+            Whether the client offers the Share button: the caller may add, change and remove permissions and the link.
+            The same rule as `Permissions.can_share`: true for the owner, for editors while `editors_can_share`; false
+            for commenters, viewers, the public link (`openLink`) and a document in the trash.
+    SharedDocument:
+      description: A `Document` as listed in "Shared with me".
+      allOf:
+        - $ref: '#/components/schemas/Document'
+        - type: object
+          required: [shared_at, new]
+          properties:
+            shared_at: { type: string, format: date-time, description: When the permission (or the invitation it came from) was made. }
+            new: { type: boolean, description: Not yet marked seen (`markSharedSeen`). }
+    Person:
+      type: object
+      required: [actor_id, display_name, email]
+      properties:
+        actor_id: { type: string }
+        display_name: { type: string }
+        email: { type: [string, 'null'], description: The verified email, when the account has signed in with one. }
+    Permission:
+      type: object
+      required: [id, actor_id, display_name, email, role, pending, created_at, expires_at]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        actor_id: { type: [string, 'null'], description: '`null` while the invitation is pending.' }
+        display_name: { type: [string, 'null'], description: '`null` while the invitation is pending.' }
+        email:
+          type: [string, 'null']
+          description: >-
+            The address invited (also once the invitation was taken, or for a permission granted at once), never the
+            account's current email, which may have changed since.
+        role: { $ref: '#/components/schemas/GrantRole' }
+        pending: { type: boolean, description: No account has signed in with this verified email yet. }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: [string, 'null'], format: date-time }
+    ShareSettings:
+      type: object
+      required: [editors_can_share, viewers_can_download]
+      properties:
+        editors_can_share: { type: boolean, description: 'Editors may change permissions and the link (default true).' }
+        viewers_can_download:
+          type: boolean
+          description: >-
+            Commenters, viewers and link viewers may download, print and copy (default true). Advisory: the client
+            hides those features, but the server still serves the bytes, which viewing needs.
+    LinkState:
+      type: object
+      required: [enabled, role, expires_at]
+      properties:
+        enabled: { type: boolean, description: The link is on and not expired. }
+        role: { oneOf: [{ const: viewer }, { type: 'null' }] }
+        expires_at: { type: [string, 'null'], format: date-time }
+        token:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{43}$'
+          description: >-
+            The link token, so it can be copied again. Present only while `enabled` and when the caller's `can_share`
+            is true; absent (not `null`) for everyone else.
+    LinkCreated:
+      type: object
+      required: [token, role, expires_at]
+      properties:
+        token: { type: string, pattern: '^[A-Za-z0-9_-]{43}$', description: 'The link token: the existing one while the link was already on.' }
+        role: { const: viewer }
+        expires_at: { type: [string, 'null'], format: date-time }
+    Permissions:
+      type: object
+      required: [role, owner, permissions, total, settings, link, can_share]
+      properties:
+        role: { $ref: '#/components/schemas/Role' }
+        owner: { $ref: '#/components/schemas/Person' }
+        permissions:
+          type: array
+          description: Oldest first, at most 500. Commenters and viewers get only their own.
+          items: { $ref: '#/components/schemas/Permission' }
+        total:
+          type: integer
+          minimum: 0
+          description: How many permissions the caller could see in all; more than `permissions` holds only past 500.
+        settings: { $ref: '#/components/schemas/ShareSettings' }
+        link: { $ref: '#/components/schemas/LinkState' }
+        can_share: { type: boolean, description: 'The caller may add, change and remove permissions and the link; always equal to `Document.can_share`.' }
+    PermissionsAdded:
+      description: '`addPermissions`: the updated sharing and how many emails were not queued.'
+      allOf:
+        - $ref: '#/components/schemas/Permissions'
+        - type: object
+          required: [mail_skipped]
+          properties:
+            mail_skipped:
+              type: integer
+              minimum: 0
+              description: >-
+                Emails not queued: the caller has no verified email, or a daily cap was reached (see **Email**). 0
+                without `notify` or SMTP.
     Version:
       type: object
       required: [version, size, sha256, author_name, created_at]
@@ -590,10 +1126,12 @@ components:
           type: string
           enum:
             - UNAUTHENTICATED
+            - FORBIDDEN
             - NOT_FOUND
             - NAME_TAKEN
             - FOLDER_CYCLE
             - VERSION_CONFLICT
+            - VERSION_IS_CURRENT
             - PRECONDITION_REQUIRED
             - QUOTA_EXCEEDED
             - TOO_LARGE
@@ -601,6 +1139,7 @@ components:
             - INVALID_SIGNATURE
             - INVALID_REQUEST
             - IDEMPOTENCY_MISMATCH
+            - TOO_MANY_PERMISSIONS
             - RATE_LIMITED
             - UNAVAILABLE
             - METHOD_NOT_ALLOWED
@@ -614,10 +1153,26 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
     NotFound:
-      description: '`NOT_FOUND`: does not exist, is purged, or is not the caller''s. Never distinguished.'
+      description: '`NOT_FOUND`: does not exist, is purged, the caller has no role on it, or it is trashed and the caller is not the owner. Never distinguished.'
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: '`FORBIDDEN`: the caller can see the document, but its role does not allow this (see **Authorization**).'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    VersionConflict:
+      description: '`VERSION_CONFLICT`: the current version is not the one in `If-Match`.'
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Error'
+              - type: object
+                required: [latest_version]
+                properties:
+                  latest_version: { type: integer, minimum: 1 }
     Conflict:
       description: '`NAME_TAKEN`: a folder with that name already exists in the same parent.'
       content:
@@ -629,7 +1184,7 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
     Unprocessable:
-      description: '`UNSUPPORTED_TYPE`, `INVALID_SIGNATURE`, `FOLDER_CYCLE`, `INVALID_REQUEST` or `IDEMPOTENCY_MISMATCH`.'
+      description: '`UNSUPPORTED_TYPE`, `INVALID_SIGNATURE`, `FOLDER_CYCLE`, `INVALID_REQUEST`, `IDEMPOTENCY_MISMATCH` or `TOO_MANY_PERMISSIONS`.'
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }

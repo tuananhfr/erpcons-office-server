@@ -13,8 +13,13 @@ testing = []
 [dependencies]
 office-db.workspace = true
 office-identity.workspace = true
+office-mail.workspace = true
 office-storage.workspace = true
+aes-gcm.workspace = true
 base64.workspace = true
+hex.workspace = true
+ring.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["io-util", "sync"] }

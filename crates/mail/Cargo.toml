@@ -1,0 +1,28 @@
+[package]
+name = "office-mail"
+description = "Notification mail of the Office online server: queued notices, their text, the SMTP transport and the outbox job"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+office-db.workspace = true
+async-trait.workspace = true
+lettre.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+office-db = { workspace = true, features = ["testing"] }
+sqlx.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread"] }
+
+[lints]
+workspace = true

@@ -1,6 +1,6 @@
 use std::sync::{
     Arc, Mutex, PoisonError,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicU32, Ordering},
 };
 
 use tokio::sync::Notify;
@@ -12,16 +12,26 @@ pub enum FailPoint {
     AfterPut,
     /// Version, document and audit rows are written; the commit has not happened.
     BeforeCommit,
+    /// A sharing attempt has written its permissions; it fails as when a sign-in attached an
+    /// invitation for the same person meanwhile (a unique index collision).
+    ShareCollision,
+    /// A version's deletion is committed and its bytes are unused; they are not deleted yet, as
+    /// when the server stops right there.
+    AfterVersionDelete,
 }
 
-/// Armed fail points fire once; a hold pauses the next request there once. Never used outside
-/// tests.
+/// Armed fail points fire once (or as often as armed); a hold pauses the next request there once.
+/// Never used outside tests.
 #[derive(Debug, Default)]
 pub struct FailPoints {
-    after_put: AtomicBool,
-    before_commit: AtomicBool,
+    after_put: AtomicU32,
+    before_commit: AtomicU32,
+    share_collision: AtomicU32,
+    after_version_delete: AtomicU32,
     after_put_hold: Mutex<Option<Arc<Gate>>>,
     before_commit_hold: Mutex<Option<Arc<Gate>>>,
+    share_collision_hold: Mutex<Option<Arc<Gate>>>,
+    after_version_delete_hold: Mutex<Option<Arc<Gate>>>,
 }
 
 #[derive(Debug, Default)]
@@ -47,7 +57,12 @@ impl Held {
 
 impl FailPoints {
     pub fn arm(&self, point: FailPoint) {
-        self.flag(point).store(true, Ordering::SeqCst);
+        self.arm_times(point, 1);
+    }
+
+    /// Fires at the next `times` requests that reach `point`.
+    pub fn arm_times(&self, point: FailPoint, times: u32) {
+        self.flag(point).store(times, Ordering::SeqCst);
     }
 
     /// Pauses the next request that reaches `point` until [`Held::release`].
@@ -61,7 +76,9 @@ impl FailPoints {
     }
 
     pub(crate) fn fires(&self, point: FailPoint) -> bool {
-        self.flag(point).swap(false, Ordering::SeqCst)
+        self.flag(point)
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
     }
 
     pub(crate) async fn pause(&self, point: FailPoint) {
@@ -77,10 +94,12 @@ impl FailPoints {
         }
     }
 
-    fn flag(&self, point: FailPoint) -> &AtomicBool {
+    fn flag(&self, point: FailPoint) -> &AtomicU32 {
         match point {
             FailPoint::AfterPut => &self.after_put,
             FailPoint::BeforeCommit => &self.before_commit,
+            FailPoint::ShareCollision => &self.share_collision,
+            FailPoint::AfterVersionDelete => &self.after_version_delete,
         }
     }
 
@@ -88,6 +107,8 @@ impl FailPoints {
         match point {
             FailPoint::AfterPut => &self.after_put_hold,
             FailPoint::BeforeCommit => &self.before_commit_hold,
+            FailPoint::ShareCollision => &self.share_collision_hold,
+            FailPoint::AfterVersionDelete => &self.after_version_delete_hold,
         }
     }
 }

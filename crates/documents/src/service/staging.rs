@@ -29,7 +29,7 @@ impl Documents {
         format: Format,
         source: ObjectReader,
     ) -> Result<Staged, DocError> {
-        let result = match self.check_room(c).await {
+        let result = match self.check_room(c.actor_id()).await {
             Ok(()) => self.stage(format, source).await,
             Err(e) => Err(e),
         };
@@ -40,7 +40,7 @@ impl Documents {
 
     /// Stores the blank template of `format`.
     pub async fn stage_blank(&self, c: &Caller<'_>, format: Format) -> Result<Staged, DocError> {
-        let result = match self.check_room(c).await {
+        let result = match self.check_room(c.actor_id()).await {
             Ok(()) => {
                 self.stage(format, Box::pin(Cursor::new(templates::blank(format))))
                     .await
@@ -52,10 +52,10 @@ impl Documents {
         result
     }
 
-    /// Refuses an actor already at its quota before any byte is stored. The exact check, with the
+    /// Refuses an owner already at its quota before any byte is stored. The exact check, with the
     /// incoming size, runs again in the transaction that records the bytes.
-    pub(super) async fn check_room(&self, c: &Caller<'_>) -> Result<(), DocError> {
-        let used = quota::used_bytes(&self.db, c.owner())
+    pub(super) async fn check_room(&self, owner_id: &str) -> Result<(), DocError> {
+        let used = quota::used_bytes(&self.db, owner_id)
             .await
             .map_err(DocError::db)?;
         if u64::try_from(used).unwrap_or(u64::MAX) >= self.quota.limit_bytes {

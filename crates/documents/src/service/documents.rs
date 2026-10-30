@@ -1,12 +1,12 @@
-use office_db::{ItemState, PgExecutor, documents, locks};
+use office_db::{ItemState, documents, locks};
 use uuid::Uuid;
 
 use super::{
-    Caller, Documents,
+    Caller, Documents, access,
     audit::{self, Subject},
     folders::{active_folder, restore_target},
 };
-use crate::{Action, DocError, Document, Name, Resource, authorize};
+use crate::{Action, DocError, Document, Name};
 
 /// A rename and/or move; at least one is set. Neither creates a version.
 pub struct DocumentPatch {
@@ -15,50 +15,11 @@ pub struct DocumentPatch {
     pub folder_id: Option<Option<Uuid>>,
 }
 
-/// Loads a document the caller may act on. Drafts, purged documents and other owners' are
-/// all [`DocError::NotFound`].
-pub(super) async fn owned_document(
-    db: impl PgExecutor<'_>,
-    c: &Caller<'_>,
-    id: Uuid,
-    action: Action,
-) -> Result<documents::DocumentRow, DocError> {
-    let row = documents::get(db, id)
-        .await
-        .map_err(DocError::db)?
-        .ok_or(DocError::NotFound)?;
-    authorize(
-        c.actor,
-        Resource::Document {
-            owner_id: &row.owner_id,
-        },
-        action,
-    )?;
-    if !matches!(row.state, ItemState::Active | ItemState::Trashed) {
-        return Err(DocError::NotFound);
-    }
-    Ok(row)
-}
-
-/// As [`owned_document`], and not in the trash: a trashed document can be read, not changed.
-pub(super) async fn active_document(
-    db: impl PgExecutor<'_>,
-    c: &Caller<'_>,
-    id: Uuid,
-    action: Action,
-) -> Result<documents::DocumentRow, DocError> {
-    let row = owned_document(db, c, id, action).await?;
-    if row.state != ItemState::Active {
-        return Err(DocError::NotFound);
-    }
-    Ok(row)
-}
-
 impl Documents {
     pub async fn get_document(&self, c: &Caller<'_>, id: Uuid) -> Result<Document, DocError> {
-        owned_document(&self.db, c, id, Action::Read)
+        access::load(&self.db, c, id, Action::Read)
             .await?
-            .try_into()
+            .document()
     }
 
     pub async fn update_document(
@@ -83,13 +44,21 @@ impl Documents {
             return Err(DocError::InvalidRequest);
         }
         let title = patch.title.as_deref().map(Name::parse).transpose()?;
+        // Folders are the owner's: a move is the owner's alone, a rename also an editor's.
+        let action = if patch.folder_id.is_some() {
+            Action::Move
+        } else {
+            Action::Rename
+        };
         let mut tx = self.begin().await?;
         if patch.folder_id.is_some() {
-            locks::tree(&mut tx, c.owner())
+            // Only the owner gets past the check below, so this is the owner's tree.
+            locks::tree(&mut tx, c.actor_id())
                 .await
                 .map_err(DocError::db)?;
         }
-        active_document(&mut *tx, c, id, Action::Write).await?;
+        // The row lock makes the decision hold until the commit, as for every other write.
+        access::load_for_update(&mut tx, c, id, action).await?;
         if let Some(Some(folder)) = patch.folder_id {
             active_folder(&mut *tx, c, folder, Action::Write).await?;
         }
@@ -104,9 +73,9 @@ impl Documents {
             return Err(DocError::NotFound);
         }
         audit::success(&mut tx, c, "document.update", Subject::Document(id)).await?;
-        let row = active_document(&mut *tx, c, id, Action::Read).await?;
+        let accessed = access::load_active(&mut *tx, c, id, Action::Read).await?;
         tx.commit().await.map_err(DocError::db)?;
-        row.try_into()
+        accessed.document()
     }
 
     /// Moves the document to the trash; trashing it again is a no-op.
@@ -119,8 +88,8 @@ impl Documents {
 
     async fn trash_document_inner(&self, c: &Caller<'_>, id: Uuid) -> Result<(), DocError> {
         let mut tx = self.begin().await?;
-        let row = owned_document(&mut *tx, c, id, Action::Trash).await?;
-        if row.state == ItemState::Trashed {
+        let accessed = access::load(&mut *tx, c, id, Action::Trash).await?;
+        if accessed.row.state == ItemState::Trashed {
             return Ok(());
         }
         if !documents::trash(&mut *tx, id).await.map_err(DocError::db)? {
@@ -142,14 +111,15 @@ impl Documents {
 
     async fn restore_document_inner(&self, c: &Caller<'_>, id: Uuid) -> Result<Document, DocError> {
         let mut tx = self.begin().await?;
-        locks::tree(&mut tx, c.owner())
+        // Restoring is the owner's alone, so this is the owner's tree.
+        locks::tree(&mut tx, c.actor_id())
             .await
             .map_err(DocError::db)?;
-        let row = owned_document(&mut *tx, c, id, Action::Restore).await?;
-        if row.state == ItemState::Active {
-            return row.try_into();
+        let accessed = access::load(&mut *tx, c, id, Action::Restore).await?;
+        if accessed.row.state == ItemState::Active {
+            return accessed.document();
         }
-        let folder = restore_target(&mut tx, c, row.folder_id).await?;
+        let folder = restore_target(&mut tx, c, accessed.row.folder_id).await?;
         if !documents::restore(&mut *tx, id, folder)
             .await
             .map_err(DocError::db)?
@@ -157,8 +127,8 @@ impl Documents {
             return Err(DocError::NotFound);
         }
         audit::success(&mut tx, c, "document.restore", Subject::Document(id)).await?;
-        let row = owned_document(&mut *tx, c, id, Action::Read).await?;
+        let accessed = access::load(&mut *tx, c, id, Action::Read).await?;
         tx.commit().await.map_err(DocError::db)?;
-        row.try_into()
+        accessed.document()
     }
 }

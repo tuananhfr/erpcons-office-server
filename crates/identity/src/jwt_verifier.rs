@@ -7,10 +7,10 @@ use tracing::debug;
 use crate::{
     Actor, IdentityVerifier, VerifyError,
     cache::{TokenHash, VerdictCache, hash_token},
-    display_name::{DisplayNames, DisplayNamesConfig},
     http,
     jwks::{Jwks, JwksConfig},
     jwt::{self, MAX_TOKEN_LEN, Policy, Reject},
+    profile::{Profiles, ProfilesConfig},
     single_flight::SingleFlight,
 };
 
@@ -71,7 +71,7 @@ pub struct JwtVerifier {
     clients: Vec<String>,
     leeway_secs: i64,
     jwks: Jwks,
-    names: DisplayNames,
+    profiles: Profiles,
     cache: VerdictCache,
     /// One check per token at a time: a burst of requests with a fresh token shares it.
     inflight: SingleFlight<TokenHash, Result<Actor, VerifyError>>,
@@ -93,9 +93,9 @@ impl JwtVerifier {
                 min_refresh: config.jwks_min_refresh,
             },
         );
-        let names = DisplayNames::new(
+        let profiles = Profiles::new(
             http,
-            DisplayNamesConfig {
+            ProfilesConfig {
                 url: format!("{issuer}/id/userinfo"),
                 timeout: config.name_timeout,
                 ttl: config.name_ttl,
@@ -109,7 +109,7 @@ impl JwtVerifier {
             clients: config.allowed_clients,
             leeway_secs: i64::try_from(config.leeway.as_secs()).unwrap_or(i64::MAX),
             jwks,
-            names,
+            profiles,
             cache: VerdictCache::new(config.max_cache_entries),
             inflight: SingleFlight::new(),
             positive_ttl: config.positive_ttl,
@@ -125,10 +125,11 @@ impl JwtVerifier {
         };
         let remaining = u64::try_from(accepted.exp.saturating_sub(unix_now())).unwrap_or(0);
         let ttl = self.positive_ttl.min(Duration::from_secs(remaining));
-        let display_name = self.names.get(&accepted.sub, token).await;
+        let profile = self.profiles.get(&accepted.sub, token).await;
         let actor = Actor {
             actor_id: accepted.sub,
-            display_name,
+            display_name: profile.name,
+            email: profile.email,
             expires_at: OffsetDateTime::now_utc() + ttl,
         };
         (Ok(actor), ttl)

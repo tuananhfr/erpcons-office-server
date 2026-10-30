@@ -83,6 +83,8 @@ impl From<DocError> for ApiError {
                 return Self::version_conflict(latest_version);
             }
             DocError::NotFound => ErrorCode::NotFound,
+            DocError::CurrentVersion => ErrorCode::VersionIsCurrent,
+            DocError::Forbidden => ErrorCode::Forbidden,
             DocError::NameTaken => ErrorCode::NameTaken,
             DocError::FolderCycle => ErrorCode::FolderCycle,
             DocError::QuotaExceeded => ErrorCode::QuotaExceeded,
@@ -91,6 +93,10 @@ impl From<DocError> for ApiError {
             DocError::InvalidSignature => ErrorCode::InvalidSignature,
             DocError::InvalidRequest => ErrorCode::InvalidRequest,
             DocError::Unavailable => ErrorCode::Unavailable,
+            DocError::Contended => return Self::retry_after(ErrorCode::Unavailable, 1),
+            DocError::TooManyPermissions => ErrorCode::TooManyPermissions,
+            // The window is a rolling day; an hour frees some of it for a typical sharer.
+            DocError::TooManyRecipients => return Self::rate_limited(3600),
         };
         Self::new(code)
     }

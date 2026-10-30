@@ -6,7 +6,14 @@
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
-ws=$(cd "$repo/.." && pwd)
+# The workspace is the nearest directory above holding erpcons-office: the parent for the usual
+# checkout, further up for a worktree such as tmp/collab-server.
+ws=$(dirname "$repo")
+while [ ! -f "$ws/erpcons-office/build/run.sh" ] && [ "$ws" != "$(dirname "$ws")" ]; do
+  ws=$(dirname "$ws")
+done
+[ -f "$ws/erpcons-office/build/run.sh" ] || { echo "no erpcons-office/build/run.sh above $repo" >&2; exit 1; }
+rel=${repo#"$ws"/}
 pg=erpcons-office-pg-test
 pg_port=55432
 
@@ -25,7 +32,7 @@ docker exec "$pg" pg_isready -U postgres -q || { echo "Postgres did not become r
 
 # The build container reaches the host-published port through host.docker.internal (Docker Desktop).
 exec bash "$ws/erpcons-office/build/run.sh" bash -c "
-  cd /ws/$(basename "$repo") &&
+  cd /ws/$rel &&
   export CARGO_TARGET_DIR=/target/wt/erpcons-office-server CARGO_BUILD_JOBS=\${CARGO_BUILD_JOBS:-4} \
          TEST_DATABASE_URL=postgres://postgres:test@host.docker.internal:$pg_port/postgres &&
   cargo fmt --all --check &&

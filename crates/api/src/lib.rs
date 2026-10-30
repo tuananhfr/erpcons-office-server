@@ -23,13 +23,14 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{HeaderValue, header::CACHE_CONTROL},
     middleware::{from_fn, from_fn_with_state},
-    routing::{get, post},
+    routing::{delete, get, patch, post, put},
 };
 use tower_http::set_header::SetResponseHeaderLayer;
 
 pub use auth::Authenticated;
 pub use config::{ApiConfig, BODY_OVERHEAD_BYTES, JSON_BODY_BYTES, RateConfig};
 pub use error::{ApiError, ErrorCode};
+pub use office_mail::MailPolicy;
 pub use request_id::RequestId;
 pub use state::AppState;
 pub use trusted_proxies::{InvalidIpNet, IpNet, TrustedProxies};
@@ -77,6 +78,38 @@ pub fn router(state: AppState) -> Router {
             "/documents/{document_id}/versions",
             get(routes::documents::versions),
         )
+        .route(
+            "/documents/{document_id}/versions/{seq}",
+            delete(routes::versions::remove),
+        )
+        .route(
+            "/documents/{document_id}/versions/{seq}/content",
+            get(routes::versions::content),
+        )
+        .route(
+            "/documents/{document_id}/versions/{seq}/restore",
+            post(routes::versions::restore),
+        )
+        .route(
+            "/documents/{document_id}/permissions",
+            get(routes::permissions::list).post(routes::permissions::add),
+        )
+        .route(
+            "/documents/{document_id}/permissions/{permission_id}",
+            patch(routes::permissions::update).delete(routes::permissions::remove),
+        )
+        .route(
+            "/documents/{document_id}/share-settings",
+            put(routes::share_settings::put),
+        )
+        .route(
+            "/documents/{document_id}/link",
+            put(routes::link::enable).delete(routes::link::disable),
+        )
+        .route("/shared", get(routes::shared::list))
+        .route("/shared/{document_id}/seen", post(routes::shared::seen))
+        .route("/link", get(routes::public_links::open))
+        .route("/link/content", get(routes::public_links::content))
         .route("/trash", get(routes::trash::list))
         .route_layer(from_fn_with_state(
             state.clone(),

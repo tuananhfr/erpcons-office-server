@@ -1,6 +1,7 @@
 //! axum's extractors with their rejections turned into the contract's `Error` body.
 use axum::{
     Json,
+    body::Bytes,
     extract::{FromRequest, FromRequestParts, Path, Query, Request},
     http::{HeaderMap, StatusCode, header::IF_MATCH, request::Parts},
 };
@@ -27,6 +28,25 @@ impl<T: DeserializeOwned, S: Send + Sync> FromRequest<S> for ApiJson<T> {
             .await
             .map(|Json(v)| Self(v))
             .map_err(|r| rejected(r.status()))
+    }
+}
+
+/// A JSON body that may be left out: no body at all is `T::default()`.
+pub(crate) struct OptionalJson<T>(pub T);
+
+impl<T: DeserializeOwned + Default, S: Send + Sync> FromRequest<S> for OptionalJson<T> {
+    type Rejection = ApiError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, ApiError> {
+        let bytes = Bytes::from_request(req, state)
+            .await
+            .map_err(|r| rejected(r.status()))?;
+        if bytes.is_empty() {
+            return Ok(Self(T::default()));
+        }
+        serde_json::from_slice(&bytes)
+            .map(Self)
+            .map_err(|_| ErrorCode::InvalidRequest.into())
     }
 }
 

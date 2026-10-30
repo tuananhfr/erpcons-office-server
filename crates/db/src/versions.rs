@@ -62,6 +62,47 @@ pub async fn list(
     .await
 }
 
+/// Deletes version `seq` of `document_id`; `false` when it has none. The foreign key from
+/// `documents` keeps the current version from going.
+pub async fn delete(
+    db: impl PgExecutor<'_>,
+    document_id: Uuid,
+    seq: i32,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM document_versions WHERE document_id = $1 AND seq = $2")
+        .bind(document_id)
+        .bind(seq)
+        .execute(db)
+        .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Where the bytes of one version are.
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct VersionContent {
+    pub storage_object_id: Uuid,
+    pub opaque_key: String,
+    pub sha256: String,
+    pub bytes: i64,
+}
+
+/// Version `seq` of `document_id`.
+pub async fn content_of(
+    db: impl PgExecutor<'_>,
+    document_id: Uuid,
+    seq: i32,
+) -> Result<Option<VersionContent>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT v.storage_object_id, o.opaque_key, v.sha256, v.bytes
+         FROM document_versions v JOIN storage_objects o ON o.id = v.storage_object_id
+         WHERE v.document_id = $1 AND v.seq = $2",
+    )
+    .bind(document_id)
+    .bind(seq)
+    .fetch_optional(db)
+    .await
+}
+
 /// The current version's content and author, and the id of the version before it.
 #[derive(Clone, sqlx::FromRow)]
 pub struct ReplayBase {

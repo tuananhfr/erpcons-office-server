@@ -1,14 +1,23 @@
 //! `/api/v1` against a real Postgres (`TEST_DATABASE_URL`) and an in-process PI stand-in.
+mod can_share;
 mod content;
 mod documents;
 mod errors;
+mod expiries;
 mod folders;
 mod health;
 mod idempotency;
 mod idor;
 mod jobs;
 mod limits;
+mod links;
 mod me;
+mod people;
 mod purge;
 mod rejections;
+mod share_caps;
+mod sharing;
 mod support;
+mod verified_emails;
+mod version_delete;
+mod versions;

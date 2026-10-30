@@ -1,6 +1,7 @@
 //! Request bodies and query strings of the contract.
-use office_documents::PageRequest;
+use office_documents::{PageRequest, Role};
 use serde::{Deserialize, Deserializer, Serialize};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{ApiError, ErrorCode};
@@ -68,4 +69,47 @@ pub(crate) struct UpdateDocument {
     pub title: Option<String>,
     #[serde(default, deserialize_with = "present")]
     pub folder_id: Option<Option<Uuid>>,
+}
+
+/// As [`present`], for an RFC 3339 time.
+fn present_time<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Option<OffsetDateTime>>, D::Error> {
+    time::serde::rfc3339::option::deserialize(d).map(Some)
+}
+
+/// `editor`, `commenter` or `viewer`; anything else is 422.
+pub(crate) fn grant_role(role: &str) -> Result<Role, ApiError> {
+    Role::parse_grant(role).ok_or_else(|| ErrorCode::InvalidRequest.into())
+}
+
+#[derive(Deserialize)]
+pub(crate) struct AddPermissions {
+    pub emails: Vec<String>,
+    pub role: String,
+    pub notify: bool,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct UpdatePermission {
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default, deserialize_with = "present_time")]
+    pub expires_at: Option<Option<OffsetDateTime>>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PutShareSettings {
+    pub editors_can_share: bool,
+    pub viewers_can_download: bool,
+}
+
+/// `expires_at` absent is `None`, `null` is `Some(None)`: a sharer other than the owner may send
+/// the link's current end, or none, but not another.
+#[derive(Default, Deserialize)]
+pub(crate) struct EnableLink {
+    #[serde(default, deserialize_with = "present_time")]
+    pub expires_at: Option<Option<OffsetDateTime>>,
 }

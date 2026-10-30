@@ -48,6 +48,8 @@ struct Shared {
 struct FakeUser {
     name: String,
     locked: bool,
+    /// Address and whether PI marks it verified; served with the `email` scope.
+    email: Option<(String, bool)>,
 }
 
 impl FakePi {
@@ -62,6 +64,7 @@ impl FakePi {
             FakeUser {
                 name: DEFAULT_NAME.to_owned(),
                 locked: false,
+                email: None,
             },
         );
         let shared = Arc::new(Mutex::new(Shared {
@@ -97,8 +100,23 @@ impl FakePi {
             FakeUser {
                 name: name.to_owned(),
                 locked: false,
+                email: None,
             },
         );
+    }
+
+    /// Gives the account an email, which userinfo reports with `email_verified: verified`.
+    pub fn set_email(&self, sub: &str, email: &str, verified: bool) {
+        if let Some(user) = self.lock().users.get_mut(sub) {
+            user.email = Some((email.to_owned(), verified));
+        }
+    }
+
+    /// Userinfo then says nothing about an email, as without the `email` scope.
+    pub fn clear_email(&self, sub: &str) {
+        if let Some(user) = self.lock().users.get_mut(sub) {
+            user.email = None;
+        }
     }
 
     /// Locks the account: PI's userinfo then refuses its tokens; their signature stays valid.
@@ -306,6 +324,12 @@ fn userinfo(shared: &Shared, authorization: Option<&str>) -> String {
         body["name"] = json!(user.name);
         body["locale"] = json!("vi-VN");
         body["country"] = json!("VN");
+    }
+    if scope.split(' ').any(|s| s == "email")
+        && let Some((email, verified)) = &user.email
+    {
+        body["email"] = json!(email);
+        body["email_verified"] = json!(verified);
     }
     http(200, &body)
 }

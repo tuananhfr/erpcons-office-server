@@ -32,6 +32,8 @@ pub struct AppState {
     /// Keyed by client and whether PI was unavailable (else the token was refused).
     pub(crate) denial_audit: Arc<KeyedLimiter<(ClientKey, bool)>>,
     pub(crate) upload_slots: Arc<ConcurrencyLimiter>,
+    /// Public view links, per client.
+    pub(crate) link_limiter: Arc<KeyedLimiter<ClientKey>>,
 }
 
 impl AppState {
@@ -41,7 +43,11 @@ impl AppState {
         identity: Arc<dyn IdentityVerifier>,
         config: ApiConfig,
     ) -> Self {
-        let docs = Arc::new(Documents::new(db.clone(), storage.clone(), config.quota));
+        let docs = Arc::new(
+            Documents::new(db.clone(), storage.clone(), config.quota)
+                .with_mail(config.mail)
+                .with_link_key(config.link_key.clone()),
+        );
         Self {
             db,
             storage,
@@ -52,6 +58,7 @@ impl AppState {
             verify_limiter: Arc::new(KeyedLimiter::new(config.verify_rate)),
             denial_audit: Arc::new(KeyedLimiter::new(DENIAL_AUDIT_RATE)),
             upload_slots: Arc::new(ConcurrencyLimiter::new(config.max_concurrent_uploads)),
+            link_limiter: Arc::new(KeyedLimiter::new(config.link_rate)),
             config: Arc::new(config),
         }
     }

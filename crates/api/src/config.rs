@@ -1,4 +1,5 @@
-use office_documents::QuotaConfig;
+use office_documents::{LinkKey, QuotaConfig};
+use office_mail::MailPolicy;
 
 use crate::TrustedProxies;
 
@@ -19,6 +20,13 @@ pub struct ApiConfig {
     pub actor_rate: RateConfig,
     /// Per client address, the token checks that need a signature check (not cached, well-formed).
     pub verify_rate: RateConfig,
+    /// Per client address, opening public view links (no sign-in, so no per-actor limit).
+    pub link_rate: RateConfig,
+    /// Whether sharing queues notification mail.
+    pub mail: MailPolicy,
+    /// `ERPCONS_LINK_KEY`; the server refuses to start without it. `None` only in tests that
+    /// never turn a link on.
+    pub link_key: Option<LinkKey>,
     /// Uploads and saves one actor may stream at once.
     pub max_concurrent_uploads: usize,
     /// Take the client address from the last `X-Forwarded-For` entry, which the reverse proxy
@@ -53,6 +61,13 @@ impl Default for ApiConfig {
                 burst: 60,
                 per_second: 5.0,
             },
+            // A view is two requests (metadata, bytes); a class opening one link shares an address.
+            link_rate: RateConfig {
+                burst: 60,
+                per_second: 2.0,
+            },
+            mail: MailPolicy::default(),
+            link_key: None,
             max_concurrent_uploads: 3,
             trust_forwarded_for: false,
             trusted_proxies: TrustedProxies::loopback(),

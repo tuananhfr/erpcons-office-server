@@ -16,6 +16,8 @@ allow = [
     "Zlib",
     "Unicode-3.0",
     "BSL-1.0",
+    # quoted_printable (lettre's mail encoding): public-domain-like, no conditions at all.
+    "0BSD",
     # Data licence of the Mozilla root certificates in webpki-root-certs (reqwest's TLS verifier).
     "CDLA-Permissive-2.0",
 ]

@@ -2,7 +2,7 @@ use office_db::{ItemState, documents::DocumentRow, folders::FolderRow, versions:
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::{DocError, Format};
+use crate::{DocError, Format, Role};
 
 /// A folder as the service returns it. No `Debug`: the name is personal data.
 #[derive(Clone)]
@@ -36,10 +36,12 @@ pub struct FolderPath {
     pub ancestors: Vec<Folder>,
 }
 
-/// A document with its current version. No `Debug`: the title is personal data.
+/// A document with its current version, as one caller sees it. No `Debug`: the title and the
+/// owner's name are personal data.
 #[derive(Clone)]
 pub struct Document {
     pub id: Uuid,
+    /// The owner's folder; `None` for anyone else, who has no access to the owner's folders.
     pub folder_id: Option<Uuid>,
     pub title: String,
     pub format: Format,
@@ -50,12 +52,26 @@ pub struct Document {
     pub trashed_at: Option<OffsetDateTime>,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
+    pub role: Role,
+    pub owner_name: String,
+    pub shared: bool,
+    pub can_download: bool,
+    pub can_share: bool,
 }
 
-impl TryFrom<DocumentRow> for Document {
-    type Error = DocError;
+/// Whether `role` may manage the sharing of a document in `state`: the one rule behind both
+/// `Document.can_share` and `Permissions.can_share`. A trashed document is shared with no one.
+pub(crate) fn can_share(role: Role, state: ItemState, editors_can_share: bool) -> bool {
+    state == ItemState::Active && role.can_share(editors_can_share)
+}
 
-    fn try_from(r: DocumentRow) -> Result<Self, DocError> {
+impl Document {
+    pub(crate) fn from_row(
+        r: DocumentRow,
+        role: Role,
+        viewers_can_download: bool,
+        editors_can_share: bool,
+    ) -> Result<Self, DocError> {
         let format = Format::from_mime(&r.mime)
             .filter(|f| f.kind().as_str() == r.kind)
             .ok_or_else(|| {
@@ -63,8 +79,9 @@ impl TryFrom<DocumentRow> for Document {
                 DocError::Unavailable
             })?;
         Ok(Self {
+            can_share: can_share(role, r.state, editors_can_share),
             id: r.id,
-            folder_id: r.folder_id,
+            folder_id: r.folder_id.filter(|_| role == Role::Owner),
             title: r.title,
             format,
             size: u64::try_from(r.size).unwrap_or(0),
@@ -74,7 +91,20 @@ impl TryFrom<DocumentRow> for Document {
             trashed_at: r.trashed_at,
             created_at: r.created_at,
             updated_at: r.updated_at,
+            role,
+            owner_name: r.owner_name,
+            shared: r.shared,
+            can_download: role.can_download(viewers_can_download),
         })
+    }
+}
+
+/// The owner's view, as in the owner's own listings.
+impl TryFrom<DocumentRow> for Document {
+    type Error = DocError;
+
+    fn try_from(r: DocumentRow) -> Result<Self, DocError> {
+        Self::from_row(r, Role::Owner, true, true)
     }
 }
 

@@ -32,6 +32,8 @@ pub struct PurgeReport {
     pub objects_deleted: u64,
     pub documents_purged: u64,
     pub folders_deleted: u64,
+    /// Permissions and share settings of purged documents.
+    pub shares_removed: u64,
     pub idempotency_keys_expired: u64,
 }
 
@@ -73,6 +75,10 @@ impl Documents {
             audit_system(&mut tx, "document.purge", Subject::Document(*id), &trace_id).await?;
         }
         report.documents_purged = purged.len() as u64;
+        // Also catches what a purge by an older binary, which knew no sharing, left behind.
+        report.shares_removed = purge::forget_sharing(&mut tx, None)
+            .await
+            .map_err(DocError::db)?;
         loop {
             let deleted = purge::delete_expired_folders(&mut tx, retention)
                 .await
