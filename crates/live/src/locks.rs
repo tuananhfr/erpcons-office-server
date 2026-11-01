@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -9,7 +10,8 @@ use crate::{MemberId, region};
 /// within its lease; a lapsed lock refuses nobody even before [`LockTable::expire`] removes it.
 #[derive(Default)]
 pub struct LockTable {
-    locks: BTreeMap<String, Lock>,
+    /// Shared so a broadcast snapshot of the table copies pointers, not regions.
+    locks: BTreeMap<Arc<str>, Lock>,
 }
 
 struct Lock {
@@ -59,13 +61,13 @@ impl LockTable {
         if !renewal && self.held_by(holder, now) >= max_per_member {
             return Err(Refusal::Limit);
         }
-        self.locks.insert(
-            region.to_owned(),
-            Lock {
-                holder,
-                until: now + ttl,
-            },
-        );
+        let until = now + ttl;
+        match self.locks.get_mut(region) {
+            Some(lock) => *lock = Lock { holder, until },
+            None => {
+                self.locks.insert(region.into(), Lock { holder, until });
+            }
+        }
         Ok(!renewal)
     }
 
@@ -107,8 +109,8 @@ impl LockTable {
     }
 
     /// Region and holder of every lock, in region order.
-    pub fn entries(&self) -> impl Iterator<Item = (&str, MemberId)> {
-        self.locks.iter().map(|(r, l)| (r.as_str(), l.holder))
+    pub fn entries(&self) -> impl Iterator<Item = (&Arc<str>, MemberId)> {
+        self.locks.iter().map(|(r, l)| (r, l.holder))
     }
 
     fn held_by(&self, holder: MemberId, now: Instant) -> usize {

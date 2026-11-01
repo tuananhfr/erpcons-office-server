@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::{ByeReason, Hub, MemberId, Mode, PresenceState, room::Replay};
+use crate::{ByeReason, Frame, Hub, MemberId, Mode, PresenceState, room::Replay};
 
 /// A session's place in a room; dropping it leaves the room, however the session ended.
 pub struct Membership {
@@ -73,7 +73,7 @@ impl Membership {
     }
 
     /// `region.replay`: the messages to send straight to the socket, in order.
-    pub fn replay(&self, since: u64) -> Vec<Arc<str>> {
+    pub fn replay(&self, since: u64) -> Vec<Frame> {
         match self.hub.replay(self.document, self.id, since) {
             Some(Replay::Updates { mut updates, done }) => {
                 updates.push(done);

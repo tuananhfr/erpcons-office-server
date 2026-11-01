@@ -2,12 +2,12 @@
 //! client sends, pings, notices silence, sweeps lapsed locks, and re-reads the member's role on
 //! every access change and periodically. Logs carry outcomes only, never ids, names, regions,
 //! payloads or tickets.
-use std::{net::IpAddr, sync::Arc, time::Duration};
+use std::{net::IpAddr, time::Duration};
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use office_documents::DocError;
 use office_live::{
-    ByeReason, CloseCode, Event, JoinRefused, Membership, Mode,
+    ByeReason, CloseCode, Event, Frame, JoinRefused, Membership, Mode,
     protocol::{self, LiveErrorCode},
 };
 use tokio::{
@@ -220,12 +220,12 @@ async fn answer(
 async fn write_through(
     socket: &mut WebSocket,
     events: &mut Receiver<Event>,
-    messages: Vec<Arc<str>>,
+    messages: Vec<Frame>,
     grace: Duration,
 ) -> Result<Vec<Event>, End> {
     let mut held = Vec::new();
     for text in messages {
-        send(socket, String::from(&*text), grace)
+        send(socket, text.to_text(), grace)
             .await
             .map_err(|()| End::Gone)?;
         loop {
@@ -251,7 +251,7 @@ async fn on_event(
     grace: Duration,
 ) -> Option<End> {
     match event {
-        Event::Send(text) => send(socket, String::from(&*text), grace)
+        Event::Send(frame) => send(socket, frame.to_text(), grace)
             .await
             .err()
             .map(|()| End::Gone),

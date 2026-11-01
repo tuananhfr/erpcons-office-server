@@ -76,7 +76,7 @@ site's own origin (`office.erpcons.vn`, Apache reverse proxy to `127.0.0.1:8710`
 | `ERPCONS_LIVE_MAX_CONNECTIONS` | `5000` | Live connections on the whole server. Per document: 50 connections, 10 editors (fixed) |
 | `ERPCONS_LIVE_MAX_REGION_BYTES` | `1048576` | Largest `region.update` message (co-editing), on connections that joined able to edit; every other message stays at 16 KiB. At most 4194304 (a connection's region byte burst) |
 | `ERPCONS_LIVE_MAX_LOG_BYTES` | `8388608` | `region.update` bytes a live room keeps since the last save, for replay; past it the oldest go and the leader is asked to save |
-| `ERPCONS_LIVE_MAX_TOTAL_LOG_BYTES` | `536870912` | What all live rooms' logs (and remembered client ids, charged at their cap) may hold on the node; at least `ERPCONS_LIVE_MAX_LOG_BYTES`. Past it rooms above their fair share shed their oldest updates (leaders asked to save); if that is not enough a `region.update` is refused `SERVER_BUSY` for the client to resend |
+| `ERPCONS_LIVE_MAX_TOTAL_LOG_BYTES` | `536870912` | What all live rooms' logs (and remembered client ids, charged at their cap) may hold on the node; at least `ERPCONS_LIVE_MAX_LOG_BYTES`. Past it rooms idle 10 min since their last save give back their remembered ids, then rooms above their fair share shed their oldest updates (leaders asked to save); if that is not enough a `region.update` is refused `SERVER_BUSY` for the client to resend |
 | `RUST_LOG` | `info,sqlx=warn` | Log filter |
 
 ## Tests

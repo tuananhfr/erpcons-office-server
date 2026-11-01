@@ -1,11 +1,11 @@
 //! What a client sends: size and rate checks, then the room. Rates are per connection: every frame
 //! counts towards the message rate, except cursors within their own allowance; `region.update`
 //! also spends a byte allowance and `region.replay` a request allowance.
-use std::{sync::Arc, time::Instant};
+use std::time::Instant;
 
 use axum::extract::ws::Message;
 use office_live::{
-    CloseCode, LiveConfig, Membership, MessageRate,
+    CloseCode, Frame, LiveConfig, Membership, MessageRate,
     protocol::{self, ClientMessage, LiveErrorCode},
 };
 
@@ -41,7 +41,7 @@ pub(super) enum Inbound {
     /// Answer `error` `RATE_LIMITED`, then `bye` and close.
     RateLimited,
     /// Send these straight to the socket, in order (a replay).
-    Send(Vec<Arc<str>>),
+    Send(Vec<Frame>),
     End(End),
 }
 

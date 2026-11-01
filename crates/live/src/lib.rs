@@ -5,6 +5,7 @@
 mod close;
 mod config;
 mod event;
+mod frame;
 mod hub;
 mod locks;
 mod log;
@@ -22,6 +23,7 @@ mod tickets;
 pub use close::{ByeReason, CloseCode};
 pub use config::LiveConfig;
 pub use event::Event;
+pub use frame::Frame;
 pub use hub::{Hub, JoinRefused};
 pub use locks::{LockTable, Refusal};
 pub use member::{MemberId, Participant, PresenceState};

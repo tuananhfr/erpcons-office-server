@@ -1,5 +1,6 @@
 //! All rooms of this node, and the connection counts per client network, per account and in all.
-//! One lock guards them: every operation is a few map updates and non-blocking sends.
+//! One lock guards them: every operation is a few map updates and non-blocking sends, and messages
+//! are built so that serializing them happens outside it (see [`crate::Frame`]).
 use std::{
     collections::HashMap,
     net::IpAddr,
@@ -12,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    ByeReason, Event, LiveConfig, MemberId, Membership, Mode, Participant, PresenceState,
+    ByeReason, Event, LiveConfig, MemberId, Membership, Mode, Participant, PresenceState, protocol,
     quota_network,
     room::{Replay, Room, Update},
 };
@@ -177,21 +178,29 @@ impl Hub {
         cid: &str,
         payload: &str,
     ) {
+        // Escaping up to a MiB of payload is the costly part; the lock only adds the seq.
+        let head: Arc<str> = protocol::region_update_head(region, member, payload).into();
+        let now = Instant::now();
         let mut state = self.lock();
+        let mut actor = None;
+        self.in_room(&mut state, document, |room, config| {
+            actor = room.check_update(config, member, region, cid, now);
+        });
+        let Some(actor) = actor else {
+            return;
+        };
         let Some(room) = state.rooms.get(&document) else {
             return;
         };
-        // The encoded update: payload and region, escaped, plus the envelope.
-        let bytes = payload.len() + region.len() + UPDATE_ENVELOPE_BYTES;
-        let needed = room.log_cost(&self.config, bytes);
-        let room_left = self.make_log_room(&mut state, needed);
+        let needed = room.log_cost(&self.config, head.len() + UPDATE_TAIL_BYTES);
+        let room_left = self.make_log_room(&mut state, needed, now);
         self.in_room(&mut state, document, |room, config| {
             let update = Update {
-                region,
+                actor: &actor,
                 cid,
-                payload,
+                head,
             };
-            room.update(config, member, update, room_left, Instant::now());
+            room.apply_update(config, member, update, room_left, now);
         });
     }
 
@@ -276,8 +285,22 @@ impl Hub {
     /// of the rooms above their fair share (the budget split among open rooms, at least a sixteenth
     /// of a room's log), evened down from the largest. Rooms within their share keep their logs: a
     /// heavy room cannot make others lose replay, and when shedding is not enough the update waits.
-    fn make_log_room(&self, state: &mut State, needed: usize) -> bool {
+    /// Rooms idle since their last save give back their remembered ids first, so a tenant whose
+    /// rooms filled the node once cannot block everyone's edits for good.
+    fn make_log_room(&self, state: &mut State, needed: usize, now: Instant) -> bool {
         let budget = self.config.max_total_log_bytes;
+        if state.log_bytes + needed <= budget {
+            return true;
+        }
+        let State {
+            rooms, log_bytes, ..
+        } = state;
+        for room in rooms.values_mut() {
+            let before = room.log_memory();
+            if room.release_idle(now, self.config.idle_log_release) {
+                *log_bytes = log_bytes.saturating_sub(before - room.log_memory());
+            }
+        }
         if state.log_bytes + needed <= budget {
             return true;
         }
@@ -341,8 +364,8 @@ impl Hub {
     }
 }
 
-/// Bytes of a `region.update` beyond its payload and region (type, seq, author, escaping slack).
-const UPDATE_ENVELOPE_BYTES: usize = 128;
+/// Longest `region_update_tail`: `,"seq":` and a u64 and `}`.
+const UPDATE_TAIL_BYTES: usize = 32;
 
 /// The level to cut `sizes` (largest first) down to so that together they lose at least `excess`,
 /// never below `floor`.

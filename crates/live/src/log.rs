@@ -1,9 +1,8 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::Arc,
-};
+use std::collections::{HashMap, VecDeque};
 
 use sha2::{Digest, Sha256};
+
+use crate::Frame;
 
 /// A room's `region.update`s since the last save, already encoded as their members got them, so a
 /// client that reconnects can catch up. Holds every update with `seq > floor`; the floor rises when
@@ -45,7 +44,7 @@ fn acked_key(actor: &str, cid: &str) -> AckedKey {
 
 struct Entry {
     seq: u64,
-    text: Arc<str>,
+    text: Frame,
 }
 
 /// A replay the log cannot serve: what was saved last, to reload from.
@@ -96,6 +95,18 @@ impl RoomLog {
         dropped
     }
 
+    /// Forgets the remembered ids of a room whose every update is saved, giving back their reserve;
+    /// true when it did. Only for a room idle long enough that no client still resends.
+    pub fn release_saved(&mut self) -> bool {
+        if self.reserved == 0 || !self.entries.is_empty() || self.short() {
+            return false;
+        }
+        self.acked = HashMap::new();
+        self.acked_order = VecDeque::new();
+        self.reserved = 0;
+        true
+    }
+
     pub fn saved_seq(&self) -> u64 {
         self.saved_seq
     }
@@ -112,7 +123,7 @@ impl RoomLog {
     pub fn push(
         &mut self,
         seq: u64,
-        text: Arc<str>,
+        text: Frame,
         actor: &str,
         cid: &str,
         max_bytes: usize,
@@ -144,7 +155,7 @@ impl RoomLog {
 
     /// The updates after `since`, when the log still holds all of them and `since` belongs to this
     /// room (`since <= last`).
-    pub fn since(&self, since: u64, last: u64) -> Result<Vec<Arc<str>>, Gone> {
+    pub fn since(&self, since: u64, last: u64) -> Result<Vec<Frame>, Gone> {
         if since < self.floor || since > last {
             return Err(self.gone());
         }
@@ -152,7 +163,7 @@ impl RoomLog {
             .entries
             .iter()
             .filter(|e| e.seq > since)
-            .map(|e| Arc::clone(&e.text))
+            .map(|e| e.text.clone())
             .collect())
     }
 
@@ -195,8 +206,8 @@ impl RoomLog {
 mod tests {
     use super::*;
 
-    fn text(s: &str) -> Arc<str> {
-        Arc::from(s)
+    fn text(s: &str) -> Frame {
+        Frame::from(s)
     }
 
     #[test]
@@ -217,8 +228,8 @@ mod tests {
         assert!(log.short());
         assert_eq!(log.bytes(), 8);
         assert_eq!(
-            log.since(100, 104),
-            Err(Gone {
+            log.since(100, 104).err(),
+            Some(Gone {
                 saved_seq: 100,
                 saved_version: None
             })
@@ -242,6 +253,22 @@ mod tests {
         assert!(log.since(11, 13).is_err());
         assert_eq!(log.since(12, 13).expect("after the save").len(), 1);
         assert!(!log.short());
+    }
+
+    #[test]
+    fn only_a_fully_saved_log_gives_back_its_cids() {
+        let mut log = RoomLog::new(0);
+        assert!(!log.release_saved(), "nothing charged yet");
+        log.push(1, text("a"), "u", "c1", 100, 10);
+        assert!(!log.release_saved(), "unsaved");
+        assert!(log.saved(1, 2, 1));
+        assert!(log.release_saved());
+        assert_eq!(log.memory(), 0);
+        assert_eq!(log.acked("u", "c1"), None);
+
+        log.push(2, text("aaaa"), "u", "c2", 2, 10);
+        assert!(log.short());
+        assert!(!log.release_saved(), "updates were lost before a save");
     }
 
     #[test]

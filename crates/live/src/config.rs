@@ -43,6 +43,9 @@ pub struct LiveConfig {
     /// What all rooms' logs and remembered ids may take on the node; past it rooms above their
     /// fair share shed their oldest updates (their leaders are asked to save), then updates wait.
     pub max_total_log_bytes: usize,
+    /// When the node budget is full, a room with nothing unsaved and no update for this long gives
+    /// back its remembered ids' reserve; a client resending after that could apply twice.
+    pub idle_log_release: Duration,
     /// Messages a connection may send at once, then refilled at `messages_per_second`.
     pub message_burst: u32,
     pub messages_per_second: f64,
@@ -88,6 +91,7 @@ impl Default for LiveConfig {
             max_log_bytes: 8 * 1024 * 1024,
             max_acked_cids: 4096,
             max_total_log_bytes: 512 * 1024 * 1024,
+            idle_log_release: Duration::from_secs(600),
             message_burst: 20,
             messages_per_second: 10.0,
             max_per_document: 50,

@@ -209,20 +209,28 @@ pub(crate) fn lock_denied(
 
 #[derive(Serialize)]
 struct RegionUpdate<'a> {
-    seq: u64,
     region: &'a str,
     author: MemberId,
     payload: &'a str,
 }
 
-pub(crate) fn region_update(seq: u64, region: &str, author: MemberId, payload: &str) -> String {
-    let body = RegionUpdate {
-        seq,
-        region,
-        author,
-        payload,
-    };
-    encode("region.update", body)
+/// A `region.update` without its closing brace; [`region_update_tail`] adds `seq`. Built before the
+/// hub lock is taken, as escaping a large payload is the costly part.
+pub(crate) fn region_update_head(region: &str, author: MemberId, payload: &str) -> String {
+    let mut text = encode(
+        "region.update",
+        RegionUpdate {
+            region,
+            author,
+            payload,
+        },
+    );
+    text.pop();
+    text
+}
+
+pub(crate) fn region_update_tail(seq: u64) -> String {
+    format!(",\"seq\":{seq}}}")
 }
 
 #[derive(Serialize)]

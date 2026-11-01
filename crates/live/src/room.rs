@@ -5,7 +5,7 @@
 //! is in `editing`.
 mod editing;
 
-use std::{collections::BTreeMap, net::IpAddr, sync::Arc};
+use std::{collections::BTreeMap, net::IpAddr, time::Instant};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::hmac;
@@ -15,11 +15,13 @@ use uuid::Uuid;
 pub(crate) use editing::{Replay, Update};
 
 use crate::{
-    ByeReason, Event, LiveConfig, LockTable, MemberId, Mode, Notice, Participant, PresenceState,
+    ByeReason, Event, Frame, LiveConfig, LockTable, MemberId, Mode, Notice, Participant,
+    PresenceState,
+    frame::LocksSnapshot,
     log::RoomLog,
     member::Member,
     palette,
-    protocol::{self, Hello, Limits, LockView, MemberView},
+    protocol::{self, Hello, Limits, MemberView},
 };
 
 pub(crate) struct Room {
@@ -37,6 +39,8 @@ pub(crate) struct Room {
     pending_announce: bool,
     /// The lock table changed; the members have not been told yet.
     locks_changed: bool,
+    /// When the last update was logged.
+    last_update: Option<Instant>,
     /// Keys `person`: the same account's connections share one, unlinkable to the account or to
     /// any other room.
     person_key: hmac::Key,
@@ -55,6 +59,7 @@ impl Room {
             removed: Vec::new(),
             pending_announce: false,
             locks_changed: false,
+            last_update: None,
             person_key: hmac::Key::new(hmac::HMAC_SHA256, &random_salt()),
         }
     }
@@ -119,8 +124,8 @@ impl Room {
         let leader_changed = self.update_leader();
         self.send_hello(config, id);
         if !self.locks.is_empty() {
-            let text = self.locks_message();
-            self.deliver(id, Event::Send(text.into()));
+            let frame = self.locks_frame();
+            self.deliver(id, Event::Send(frame));
         }
         self.broadcast_presence(Some(id));
         if leader_changed {
@@ -353,8 +358,8 @@ impl Room {
     }
 
     fn broadcast_presence(&mut self, except: Option<MemberId>) {
-        let named: Arc<str> = protocol::presence(self.seq, &self.views(true)).into();
-        let anonymous: Arc<str> = protocol::presence(self.seq, &self.views(false)).into();
+        let named = Frame::from(protocol::presence(self.seq, &self.views(true)));
+        let anonymous = Frame::from(protocol::presence(self.seq, &self.views(false)));
         let targets: Vec<(MemberId, bool)> = self
             .members
             .iter()
@@ -363,13 +368,13 @@ impl Room {
             .collect();
         for (id, names) in targets {
             let text = if names { &named } else { &anonymous };
-            self.deliver(id, Event::Send(Arc::clone(text)));
+            self.deliver(id, Event::Send(text.clone()));
         }
     }
 
     fn broadcast_leader(&mut self, except: Option<MemberId>) {
-        let text: Arc<str> = protocol::leader(self.seq, self.leader).into();
-        self.broadcast(&text, except);
+        let frame = Frame::from(protocol::leader(self.seq, self.leader));
+        self.broadcast(&frame, except);
     }
 
     /// A short opaque key for `actor` in this room: HMAC-SHA256 under the room's random key, 16
@@ -379,20 +384,20 @@ impl Room {
         URL_SAFE_NO_PAD.encode(&tag.as_ref()[..16])
     }
 
-    /// The lock table as members see it, under a new seq.
-    fn locks_message(&self) -> String {
-        let table: BTreeMap<&str, LockView> = self
+    /// The lock table as members see it at the current seq; serialized later, outside the hub lock.
+    fn locks_frame(&self) -> Frame {
+        let entries = self
             .locks
             .entries()
             .filter_map(|(region, holder)| {
                 let colour = self.members.get(&holder)?.colour;
-                Some((region, LockView { holder, colour }))
+                Some((region.clone(), holder, colour))
             })
             .collect();
-        protocol::locks(self.seq, &table)
+        Frame::locks(LocksSnapshot::new(self.seq, entries))
     }
 
-    fn broadcast(&mut self, text: &Arc<str>, except: Option<MemberId>) {
+    fn broadcast(&mut self, frame: &Frame, except: Option<MemberId>) {
         let targets: Vec<MemberId> = self
             .members
             .keys()
@@ -400,7 +405,7 @@ impl Room {
             .filter(|id| Some(*id) != except)
             .collect();
         for id in targets {
-            self.deliver(id, Event::Send(Arc::clone(text)));
+            self.deliver(id, Event::Send(frame.clone()));
         }
     }
 
@@ -426,8 +431,8 @@ impl Room {
                 self.after_change(config, before);
             } else if std::mem::take(&mut self.locks_changed) {
                 self.seq += 1;
-                let text: Arc<str> = self.locks_message().into();
-                self.broadcast(&text, None);
+                let frame = self.locks_frame();
+                self.broadcast(&frame, None);
             } else {
                 break;
             }

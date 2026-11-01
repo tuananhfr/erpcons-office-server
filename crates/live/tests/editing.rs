@@ -46,7 +46,7 @@ fn join(hub: &Arc<Hub>, doc: Uuid, who: Participant, allowed: Mode) -> Client {
 impl Client {
     fn next(&mut self) -> Value {
         match self.events.try_recv().expect("an event") {
-            Event::Send(text) => serde_json::from_str(&text).expect("json"),
+            Event::Send(text) => serde_json::from_str(&text.to_text()).expect("json"),
             Event::Close(reason) => panic!("closed: {reason:?}"),
             Event::Recheck => panic!("recheck"),
         }
@@ -65,7 +65,7 @@ impl Client {
     fn all_of(&mut self, kind: &str) -> Vec<Value> {
         let mut found = Vec::new();
         while let Ok(Event::Send(text)) = self.events.try_recv() {
-            let message: Value = serde_json::from_str(&text).expect("json");
+            let message: Value = serde_json::from_str(&text.to_text()).expect("json");
             if message["type"] == kind {
                 found.push(message);
             }
@@ -107,7 +107,7 @@ impl Client {
         self.membership
             .replay(since)
             .iter()
-            .map(|text| serde_json::from_str(text).expect("json"))
+            .map(|text| serde_json::from_str(&text.to_text()).expect("json"))
             .collect()
     }
 }
@@ -629,6 +629,60 @@ fn a_heavy_room_waits_rather_than_shed_a_light_one() {
         "ack",
         "sent again after the save"
     );
+}
+
+#[test]
+fn a_refused_update_never_makes_another_room_shed() {
+    let hub = hub(tight);
+    let (big, small) = (Uuid::new_v4(), Uuid::new_v4());
+    let (mut a, mut leader) = pair(&hub, big, ["a", "l"]);
+    let (mut v, mut w) = pair(&hub, small, ["v", "w"]);
+    let mut viewer = join(&hub, small, user("x"), Mode::View);
+    viewer.drain();
+    let start = a.hello["saved_seq"].as_u64().expect("saved");
+    assert_eq!(v.update("p", "s1", "s")["type"], "ack");
+    let payload = "x".repeat(500);
+    for n in 0..13 {
+        assert_eq!(a.update("p", &format!("u{n}"), &payload)["type"], "ack");
+    }
+    leader.drain();
+    w.drain();
+
+    // Each would overflow the node and shed the big room, were it taken.
+    let large = "y".repeat(4000);
+    assert_eq!(w.update("p", "w1", &large)["code"], "LOCK_REQUIRED");
+    assert_eq!(v.update("p", "s1", &large)["type"], "ack", "a resend");
+    assert_eq!(viewer.update("p", "x1", &large)["code"], "FORBIDDEN_MODE");
+
+    assert!(leader.all_of("save.request").is_empty(), "nothing shed");
+    assert_eq!(a.replay(start).len(), 14, "the big room keeps its log");
+}
+
+#[test]
+fn rooms_idle_since_a_save_give_back_their_reserve_to_a_full_node() {
+    for (idle, accepted) in [(Duration::ZERO, true), (Duration::from_secs(600), false)] {
+        let hub = hub(|c| {
+            tight(c);
+            c.idle_log_release = idle;
+        });
+        let mut kept = Vec::new();
+        for n in 0..5 {
+            let doc = Uuid::new_v4();
+            let (mut editor, leader) = pair(&hub, doc, ["e", "l"]);
+            let seq = editor.update("p", &format!("c{n}"), "x")["seq"]
+                .as_u64()
+                .expect("seq");
+            hub.saved(doc, "l", seq, 2);
+            kept.push((editor, leader));
+        }
+        let (mut a, _b) = pair(&hub, Uuid::new_v4(), ["a", "b"]);
+        let answer = a.update("p", "new", "x");
+        if accepted {
+            assert_eq!(answer["type"], "ack", "{answer}");
+        } else {
+            assert_eq!(answer["code"], "SERVER_BUSY", "within 10 minutes: {answer}");
+        }
+    }
 }
 
 #[test]

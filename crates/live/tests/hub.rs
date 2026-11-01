@@ -39,7 +39,7 @@ impl Client {
     /// The next queued message, which must be there.
     fn next(&mut self) -> Value {
         match self.events.try_recv().expect("an event") {
-            Event::Send(text) => serde_json::from_str(&text).expect("json"),
+            Event::Send(text) => serde_json::from_str(&text.to_text()).expect("json"),
             Event::Close(reason) => panic!("closed: {reason:?}"),
             Event::Recheck => panic!("recheck"),
         }
@@ -337,7 +337,7 @@ fn a_member_that_falls_behind_is_dropped() {
         for state in [PresenceState::Idle, PresenceState::Active] {
             a.membership.set_state(state);
             while let Ok(Event::Send(text)) = a.events.try_recv() {
-                seen.push(serde_json::from_str::<Value>(&text).expect("json"));
+                seen.push(serde_json::from_str::<Value>(&text.to_text()).expect("json"));
             }
         }
     }

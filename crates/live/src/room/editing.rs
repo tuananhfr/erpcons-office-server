@@ -1,34 +1,35 @@
 //! Co-editing in a room (plan-m4): region locks, `region.update` with its seq and `ack`, cursors,
 //! replay of the log, and saves by the leader. Answers go through the member's queue like
 //! everything else, so a client sees them in seq order with the others' updates.
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use tokio::sync::mpsc::error::TrySendError;
 
 use super::Room;
 use crate::{
-    Event, LiveConfig, MemberId, Mode,
+    Event, Frame, LiveConfig, MemberId, Mode,
     locks::Refusal,
     log::acked_reserve,
     protocol::{self, LiveErrorCode},
 };
 
-/// A client's `region.update`.
+/// A client's `region.update` that passed [`Room::check_update`]; `head` is the message without
+/// its seq ([`protocol::region_update_head`]).
 pub(crate) struct Update<'a> {
-    pub region: &'a str,
+    pub actor: &'a str,
     pub cid: &'a str,
-    pub payload: &'a str,
+    pub head: Arc<str>,
 }
 
 /// What a `region.replay` gets, sent straight to the socket: the queue could not hold a whole log.
 pub(crate) enum Replay {
     /// The logged updates after `since`, then `region.replayed`.
-    Updates {
-        updates: Vec<Arc<str>>,
-        done: Arc<str>,
-    },
+    Updates { updates: Vec<Frame>, done: Frame },
     /// `error` `REPLAY_GONE`.
-    Gone(Arc<str>),
+    Gone(Frame),
 }
 
 impl Room {
@@ -102,25 +103,21 @@ impl Room {
         self.settle(config);
     }
 
-    /// Logs and relays an update of a region the sender holds; a resend of a `cid` already taken
-    /// gets the same `ack` again and changes nothing.
-    /// `room_left`: whether the node's log budget takes it; if not it is refused `SERVER_BUSY`
-    /// (with `cid`) for the client to send again later.
-    pub fn update(
+    /// Whether the member may log an update of `region` now; returns its account if so. Otherwise
+    /// it has had its answer: `FORBIDDEN_MODE`, `LOCK_REQUIRED`, or for a resend of a `cid` already
+    /// taken the same `ack` again. Nothing here touches the node's log budget, so a refused update
+    /// never makes another room shed.
+    pub fn check_update(
         &mut self,
         config: &LiveConfig,
         id: MemberId,
-        update: Update<'_>,
-        room_left: bool,
+        region: &str,
+        cid: &str,
         now: Instant,
-    ) {
-        let Update {
-            region,
-            cid,
-            payload,
-        } = update;
+    ) -> Option<String> {
         if !self.may_edit(id, Some(cid)) {
-            return self.settle(config);
+            self.settle(config);
+            return None;
         }
         // Only accounts edit, so an editor always has one; idempotency must outlive the member id,
         // which a reconnect changes.
@@ -130,15 +127,37 @@ impl Room {
             .and_then(|m| m.participant.actor_id())
             .map(str::to_owned)
         else {
-            return self.settle(config);
+            self.settle(config);
+            return None;
         };
         if let Some(seq) = self.log.acked(&actor, cid) {
             self.deliver(id, Event::Send(protocol::ack(cid, seq).into()));
-            return self.settle(config);
+            self.settle(config);
+            return None;
         }
         if !self.locks.touch(region, id, config.lock_ttl, now) {
             let text = protocol::error_for(LiveErrorCode::LockRequired, cid);
             self.deliver(id, Event::Send(text.into()));
+            self.settle(config);
+            return None;
+        }
+        Some(actor)
+    }
+
+    /// Logs and relays an update [`Self::check_update`] let through.
+    /// `room_left`: whether the node's log budget takes it; if not it is refused `SERVER_BUSY`
+    /// (with `cid`) for the client to send again later.
+    pub fn apply_update(
+        &mut self,
+        config: &LiveConfig,
+        id: MemberId,
+        update: Update<'_>,
+        room_left: bool,
+        now: Instant,
+    ) {
+        let Update { actor, cid, head } = update;
+        // Making room on the node may have dropped the member (a full queue).
+        if !self.members.contains_key(&id) {
             return self.settle(config);
         }
         if !room_left {
@@ -148,17 +167,18 @@ impl Room {
         }
         self.seq += 1;
         let seq = self.seq;
-        let text: Arc<str> = protocol::region_update(seq, region, id, payload).into();
+        let frame = Frame::split(head, protocol::region_update_tail(seq));
         let overflowed = self.log.push(
             seq,
-            Arc::clone(&text),
-            &actor,
+            frame.clone(),
+            actor,
             cid,
             config.max_log_bytes,
             config.max_acked_cids,
         );
+        self.last_update = Some(now);
         self.deliver(id, Event::Send(protocol::ack(cid, seq).into()));
-        self.broadcast(&text, Some(id));
+        self.broadcast(&frame, Some(id));
         if overflowed && !self.save_requested {
             self.save_requested = true;
             self.request_save();
@@ -177,7 +197,7 @@ impl Room {
             self.deliver(id, Event::Send(text.into()));
             return self.settle(config);
         }
-        let text: Arc<str> = protocol::cursor(id, region, range).into();
+        let text = Frame::from(protocol::cursor(id, region, range));
         let mut gone = Vec::new();
         for (other, member) in &self.members {
             if *other == id || member.sender.capacity() <= config.outbox / 2 {
@@ -223,8 +243,8 @@ impl Room {
         if !leads || !self.log.saved(live_seq, version, self.seq) {
             return;
         }
-        let text: Arc<str> = protocol::saved(self.log.saved_seq(), version).into();
-        self.broadcast(&text, None);
+        let frame = Frame::from(protocol::saved(self.log.saved_seq(), version));
+        self.broadcast(&frame, None);
         // A save older than the trimmed log leaves newcomers unable to replay: ask again.
         self.save_requested = self.log.short();
         if self.save_requested {
@@ -246,6 +266,15 @@ impl Room {
         } else {
             bytes + acked_reserve(config.max_acked_cids)
         }
+    }
+
+    /// Gives back the remembered ids' reserve of a room with nothing unsaved and no update for
+    /// `idle`; true when it did.
+    pub fn release_idle(&mut self, now: Instant, idle: Duration) -> bool {
+        let quiet = self
+            .last_update
+            .is_some_and(|last| now.saturating_duration_since(last) >= idle);
+        quiet && self.log.release_saved()
     }
 
     /// Sheds the log to at most `target` bytes for the node's budget; the leader is asked to save
