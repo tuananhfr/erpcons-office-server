@@ -1362,6 +1362,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "office-live"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "office-mail"
 version = "0.1.0"
 dependencies = [

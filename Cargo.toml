@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["apps/server", "crates/api", "crates/db", "crates/documents", "crates/identity", "crates/mail", "crates/signup", "crates/storage"]
+members = ["apps/server", "crates/api", "crates/db", "crates/documents", "crates/identity", "crates/live", "crates/mail", "crates/signup", "crates/storage"]
 
 [workspace.package]
 version = "0.1.0"
@@ -16,6 +16,7 @@ office-api = { path = "crates/api" }
 office-db = { path = "crates/db" }
 office-documents = { path = "crates/documents" }
 office-identity = { path = "crates/identity" }
+office-live = { path = "crates/live" }
 office-mail = { path = "crates/mail" }
 office-signup = { path = "crates/signup" }
 office-storage = { path = "crates/storage" }
