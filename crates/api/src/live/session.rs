@@ -100,8 +100,10 @@ pub(crate) async fn run(mut socket: WebSocket, session: Session) {
         loop {
             tokio::select! {
                 frame = socket.recv() => {
-                    let Some(Ok(frame)) = frame else {
-                        break End::Gone;
+                    let frame = match frame {
+                        Some(Ok(frame)) => frame,
+                        Some(Err(e)) if over_limit(&e) => break End::Close(CloseCode::TooBig),
+                        _ => break End::Gone,
                     };
                     last_heard = Instant::now();
                     let inbound = inbound::on_frame(&membership, &mut budgets, &config, frame);
@@ -158,6 +160,15 @@ pub(crate) async fn run(mut socket: WebSocket, session: Session) {
         End::ClientBye => close(&mut socket, CloseCode::Normal, grace).await,
         End::Gone => {}
     }
+}
+
+/// Whether the transport refused a frame over the connection's size limit; it sends no close
+/// itself, and the socket can still say 1009.
+fn over_limit(error: &axum::Error) -> bool {
+    matches!(
+        std::error::Error::source(error).and_then(|e| e.downcast_ref::<tungstenite::Error>()),
+        Some(tungstenite::Error::Capacity(_))
+    )
 }
 
 /// Carries out what a client frame asked for; `Some` ends the session.

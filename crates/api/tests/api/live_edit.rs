@@ -342,12 +342,12 @@ async fn region_updates_may_be_large_on_edit_connections_only() {
 
     // A viewer's connection takes no frame over 16 KiB.
     wc.send_json(&update("p", "u2", &pad)).await;
-    assert_ne!(wc.ended().await.code, Some(1000));
+    assert_eq!(wc.ended().await.code, Some(1009));
 
     // Nor an editor's over 1 MiB.
     let huge = "x".repeat(1024 * 1024);
     wa.send_json(&update("p", "u3", &huge)).await;
-    assert_ne!(wa.ended().await.code, Some(1000));
+    assert_eq!(wa.ended().await.code, Some(1009));
 }
 
 #[tokio::test]

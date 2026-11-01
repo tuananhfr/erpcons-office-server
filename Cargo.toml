@@ -51,6 +51,8 @@ tokio = "1.54.1"
 # WebSocket client of the live channel's tests; the server side is axum's `ws` (same tungstenite).
 tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["connect"] }
 tokio-util = { version = "0.7.20", features = ["io"] }
+# axum's own WebSocket implementation; named only to tell its errors apart.
+tungstenite = { version = "0.29.0", default-features = false }
 tower = "0.5.3"
 tower-http = { version = "0.7.1", features = ["trace", "set-header"] }
 tracing = "0.1.44"

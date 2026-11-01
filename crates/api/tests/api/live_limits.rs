@@ -114,7 +114,7 @@ async fn an_oversized_message_closes_the_connection() {
     wb.send_json(&json!({ "type": "presence", "v": 1, "state": "idle", "pad": padding }))
         .await;
     let ended = wb.ended().await;
-    assert_ne!(ended.code, Some(1000));
+    assert_eq!(ended.code, Some(1009));
     wa.presence_of(1).await;
     tokio::time::timeout(Duration::from_secs(5), async {
         while app.live().connections() != 1 {
