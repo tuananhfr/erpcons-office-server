@@ -60,17 +60,17 @@ pub(crate) async fn ticket(
     ApiPath(id): ApiPath<Uuid>,
     caller: TicketCaller,
 ) -> Result<Json<LiveTicketDto>, ApiError> {
-    let viewer = match caller {
+    let (viewer, link_owner) = match caller {
         TicketCaller::Actor(Authenticated(actor)) => {
             state
                 .docs
                 .live_access(id, LiveViewer::Actor(&actor))
                 .await?;
-            Viewer::Actor(actor)
+            (Viewer::Actor(actor), None)
         }
         TicketCaller::Link(hash) => {
-            state.docs.live_link_access(id, &hash, rid.as_str()).await?;
-            Viewer::Link(hash)
+            let (_, owner) = state.docs.live_link_access(id, &hash, rid.as_str()).await?;
+            (Viewer::Link(hash), Some(owner))
         }
     };
     let address = address(client);
@@ -80,6 +80,7 @@ pub(crate) async fn ticket(
             id,
             address,
             &viewer.quota_key(address),
+            link_owner.as_deref(),
             viewer,
             Instant::now(),
         )

@@ -7,10 +7,14 @@ pub struct LiveConfig {
     pub ticket_ttl: Duration,
     /// Unredeemed tickets held at once, server-wide.
     pub max_tickets: usize,
-    /// Unredeemed tickets of one holder (account or public link), and from one client address; a
-    /// new one past either replaces that key's oldest, so nobody can fill the store for everyone.
+    /// Unredeemed tickets of one holder (account or public link), and from one client network (an
+    /// IPv6 client by its /56); a new one past either replaces that key's oldest, so nobody can
+    /// fill the store for everyone.
     pub max_tickets_per_holder: usize,
     pub max_tickets_per_address: usize,
+    /// Unredeemed tickets issued through the public links of one owner's documents, so links of
+    /// many documents cannot fill the store either.
+    pub max_link_tickets_per_owner: usize,
     /// Largest message or frame a client may send.
     pub max_message_bytes: usize,
     /// Messages a connection may send at once, then refilled at `messages_per_second`.
@@ -22,7 +26,7 @@ pub struct LiveConfig {
     pub max_links_per_document: usize,
     /// Members past this who may edit join in view mode, told so, until a slot frees.
     pub max_editors: usize,
-    /// Connections from one client address (an IPv6 client by its /64).
+    /// Connections from one client network (an IPv6 client by its /56).
     pub max_per_address: usize,
     /// Connections of one account, over all documents.
     pub max_per_actor: usize,
@@ -44,6 +48,7 @@ impl Default for LiveConfig {
             // Tickets are spent within moments of their issue; these bound only abuse.
             max_tickets_per_holder: 20,
             max_tickets_per_address: 100,
+            max_link_tickets_per_owner: 300,
             max_message_bytes: 16 * 1024,
             message_burst: 20,
             messages_per_second: 10.0,

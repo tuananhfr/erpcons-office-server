@@ -259,6 +259,28 @@ fn rooms_addresses_and_the_server_have_limits() {
 }
 
 #[test]
+fn ipv6_clients_count_by_their_56() {
+    let hub = hub(|c| c.max_per_address = 2);
+    let v6 = |s: &str| Some(s.parse::<IpAddr>().expect("ip"));
+    let doc = Uuid::new_v4();
+    let _a = hub
+        .join(doc, user("a"), Mode::View, v6("2001:db8:0:100::1"))
+        .expect("a");
+    let _b = hub
+        .join(doc, user("b"), Mode::View, v6("2001:db8:0:1ff::1"))
+        .expect("b");
+    assert_eq!(
+        hub.join(doc, user("c"), Mode::View, v6("2001:db8:0:1a0::1"))
+            .err(),
+        Some(JoinRefused::AddressFull),
+        "another /64 of the same /56"
+    );
+    let _d = hub
+        .join(doc, user("d"), Mode::View, v6("2001:db8:0:200::1"))
+        .expect("another /56");
+}
+
+#[test]
 fn accounts_and_link_holders_have_limits() {
     let hub = hub(|c| {
         c.max_per_actor = 2;

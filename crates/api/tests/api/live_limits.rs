@@ -9,9 +9,10 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::{
     live::shared_document,
     live_support::{
-        Ws, connect, connect_from, join, join_link, refused, ticket, ticket_path, wait_members,
+        Ws, connect, connect_from, join, join_link, refused, refused_from, ticket, ticket_path,
+        wait_members,
     },
-    people::enable_link,
+    people::{enable_link, upload},
     support::{TestApp, ok_json},
 };
 
@@ -262,4 +263,76 @@ async fn a_link_holder_cannot_push_out_another_ones_tickets() {
     }
     let mut ws = connect_from(&app, &doc, &mine, "203.0.113.1").await;
     ws.next_of("hello").await;
+}
+
+#[tokio::test]
+async fn ipv6_clients_share_quotas_by_their_56() {
+    let Some(app) = TestApp::spawn_with(|s| {
+        s.api.trust_forwarded_for = true;
+        s.api.live = LiveConfig {
+            max_tickets_per_address: 2,
+            max_per_address: 2,
+            ..LiveConfig::default()
+        };
+    })
+    .await
+    else {
+        return;
+    };
+    let (a, _, _, doc, _) = shared_document(&app).await;
+    let link = enable_link(&app, &a, &doc).await;
+    let from = [
+        "2001:db8:0:100::1",
+        "2001:db8:0:1ff::1",
+        "2001:db8:0:1a0::1",
+    ];
+    let mut issued = Vec::new();
+    for address in from {
+        issued.push(link_ticket_from(&app, &link, &doc, address).await);
+    }
+    assert_eq!(
+        refused_from(&app, &doc, &issued[0], from[0]).await,
+        401,
+        "the oldest ticket of the /56 went"
+    );
+    let mut second = connect_from(&app, &doc, &issued[1], from[1]).await;
+    second.next_of("hello").await;
+    let mut third = connect_from(&app, &doc, &issued[2], from[2]).await;
+    third.next_of("hello").await;
+    let fourth = link_ticket_from(&app, &link, &doc, "2001:db8:0:1b0::1").await;
+    let ended = connect_from(&app, &doc, &fourth, "2001:db8:0:1b0::1")
+        .await
+        .ended()
+        .await;
+    assert_eq!(ended.said.as_deref(), Some("TOO_MANY_CONNECTIONS"));
+}
+
+#[tokio::test]
+async fn link_tickets_of_one_owner_are_capped_over_all_their_documents() {
+    let Some(app) = TestApp::spawn_with(|s| {
+        s.api.trust_forwarded_for = true;
+        s.api.live = LiveConfig {
+            max_link_tickets_per_owner: 2,
+            ..LiveConfig::default()
+        };
+    })
+    .await
+    else {
+        return;
+    };
+    let (a, _, _, doc, _) = shared_document(&app).await;
+    let (other, _) = upload(&app, &a, "second").await;
+    let link = enable_link(&app, &a, &doc).await;
+    let other_link = enable_link(&app, &a, &other).await;
+    let first = link_ticket_from(&app, &link, &doc, "203.0.113.1").await;
+    let second = link_ticket_from(&app, &other_link, &other, "203.0.113.2").await;
+    let third = link_ticket_from(&app, &link, &doc, "203.0.113.3").await;
+    assert_eq!(refused_from(&app, &doc, &first, "203.0.113.1").await, 401);
+    let mut ws = connect_from(&app, &other, &second, "203.0.113.2").await;
+    ws.next_of("hello").await;
+    let mut ws = connect_from(&app, &doc, &third, "203.0.113.3").await;
+    ws.next_of("hello").await;
+    // An account's ticket is not a link ticket.
+    let (_wa, hello) = join(&app, &a, &doc).await;
+    assert_eq!(hello["mode"], "edit");
 }

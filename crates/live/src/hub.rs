@@ -1,4 +1,4 @@
-//! All rooms of this node, and the connection counts per address, per account and in all. One
+//! All rooms of this node, and the connection counts per client network, per account and in all. One
 //! lock guards them: every operation is a few map updates and non-blocking sends.
 use std::{
     collections::HashMap,
@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::{
     ByeReason, Event, LiveConfig, MemberId, Membership, Mode, Participant, PresenceState,
-    room::Room,
+    quota_network, room::Room,
 };
 
 /// Why a connection could not join.
@@ -67,6 +67,8 @@ impl Hub {
         if self.shutdown.is_cancelled() {
             return Err(JoinRefused::ShuttingDown);
         }
+        // Members keep only the network, which is all the count needs.
+        let address = quota_network(address);
         let mut state = self.lock();
         if state.total >= self.config.max_connections {
             return Err(JoinRefused::ServerFull);

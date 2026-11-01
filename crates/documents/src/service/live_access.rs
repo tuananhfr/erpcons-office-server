@@ -28,6 +28,17 @@ impl Documents {
         id: Uuid,
         viewer: LiveViewer<'_>,
     ) -> Result<LiveAccess, DocError> {
+        self.live_accessed(id, viewer)
+            .await
+            .map(|(access, _)| access)
+    }
+
+    /// The access and the document owner's id.
+    async fn live_accessed(
+        &self,
+        id: Uuid,
+        viewer: LiveViewer<'_>,
+    ) -> Result<(LiveAccess, String), DocError> {
         let accessed = match viewer {
             LiveViewer::Actor(actor) => {
                 let c = Caller {
@@ -48,22 +59,24 @@ impl Documents {
                 accessed
             }
         };
-        Ok(LiveAccess {
+        let access = LiveAccess {
             role: accessed.role,
             trashed: accessed.row.state == office_db::ItemState::Trashed,
-        })
+        };
+        Ok((access, accessed.row.owner_id))
     }
 
-    /// As [`Self::live_access`] for a link holder about to join, audited like any link view.
+    /// As [`Self::live_access`] for a link holder about to join, audited like any link view. Also
+    /// returns the document owner's id, which caps the link tickets of all its documents.
     pub async fn live_link_access(
         &self,
         id: Uuid,
         hash: &LinkHash,
         trace_id: &str,
-    ) -> Result<LiveAccess, DocError> {
-        let access = self.live_access(id, LiveViewer::Link(hash)).await?;
+    ) -> Result<(LiveAccess, String), DocError> {
+        let accessed = self.live_accessed(id, LiveViewer::Link(hash)).await?;
         audit::link(&self.db, "link.live", id, trace_id).await;
-        Ok(access)
+        Ok(accessed)
     }
 
     /// Tells the live rooms that access to these documents changed. Called only after a commit

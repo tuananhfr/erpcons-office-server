@@ -135,8 +135,9 @@ info:
     4008. A document holds at most 50 connections (`error` `ROOM_FULL`, close 4029); at most 10 of them edit, and an
     editor past that joins in `view` mode with `notice` `editor_limit` until a slot frees (then `mode` `edit`); at
     most 30 of them came through the public link (`ROOM_FULL` past that), so people it is shared with always find
-    room. One account holds at most 20 connections and one client address 100 (`TOO_MANY_CONNECTIONS`), the server
-    5000 (`SERVER_BUSY`); the address and server limits are configurable. The server pings every 20 s; a connection
+    room. One account holds at most 20 connections and one client network (an IPv4 address, or the /56 of an IPv6
+    address) 100 (`TOO_MANY_CONNECTIONS`), the server 5000 (`SERVER_BUSY`); the network and server limits are
+    configurable. The server pings every 20 s; a connection
     silent for 30 s has left (`bye` `timeout`, close 4000). A client that does not keep up with its messages is
     dropped (close 4013). At shutdown: `bye` `shutdown`, close 1001.
 
@@ -649,8 +650,10 @@ paths:
         With `Authorization: Bearer` (any role), or without signing in with `X-Link-Token` (the public link's token;
         rate limited per address like `openLink`, audited as a link view). When `X-Link-Token` is sent, it alone
         decides. The ticket is valid for `expires_in` seconds, for this document, from this client address, once.
-        One account (a link: from one client address) holds at most 20 unspent tickets and one client address 100;
-        a new ticket past either replaces that one's oldest. 503 only when the whole server holds 10 000.
+        One account (a link: from one client network) holds at most 20 unspent tickets, one client network 100, and
+        the public links of one owner's documents together 300; a new ticket past any of these replaces that one's
+        oldest. A client network is an IPv4 address, or the /56 of an IPv6 address. 503 only when the whole server
+        holds 10 000.
       parameters:
         - name: X-Link-Token
           in: header
