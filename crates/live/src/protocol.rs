@@ -70,6 +70,9 @@ pub(crate) struct MemberView<'a> {
     pub kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<&'a str>,
+    /// The same for every connection of one account in this room; absent like `name`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub person: Option<&'a str>,
     pub colour: &'static str,
     pub mode: Mode,
     pub state: PresenceState,
@@ -96,6 +99,8 @@ fn encode<T: Serialize>(kind: &'static str, body: T) -> String {
 
 #[derive(Serialize)]
 pub(crate) struct Limits {
+    pub max_editors: usize,
+    pub max_connections: usize,
     pub max_message_bytes: usize,
     pub max_region_message_bytes: usize,
     pub messages_per_second: f64,

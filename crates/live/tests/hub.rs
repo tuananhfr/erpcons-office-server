@@ -54,6 +54,16 @@ impl Client {
         }
     }
 
+    /// The next `presence` with `n` members.
+    fn next_of_members(&mut self, n: usize) -> Value {
+        loop {
+            let message = self.next_of("presence");
+            if message["members"].as_array().map(Vec::len) == Some(n) {
+                return message;
+            }
+        }
+    }
+
     fn drain(&mut self) {
         while self.events.try_recv().is_ok() {}
     }
@@ -375,4 +385,45 @@ fn a_member_dropped_from_a_room_never_touches_a_later_one() {
     drop(b);
     assert_eq!(hub.members_of(doc), 1);
     assert_eq!(hub.connections(), 1);
+}
+
+#[test]
+fn one_account_is_one_person_in_a_room_and_unlinkable_elsewhere() {
+    let hub = hub(|c| c.max_editors = 3);
+    let doc = Uuid::new_v4();
+    let mut a1 = join(&hub, doc, user("a"), Mode::Edit);
+    let hello = a1.next();
+    assert_eq!(hello["limits"]["max_editors"], 3);
+    assert_eq!(hello["limits"]["max_connections"], 50);
+    let _a2 = join(&hub, doc, user("a"), Mode::Edit);
+    let _b = join(&hub, doc, user("b"), Mode::View);
+    let _link = join(&hub, doc, Participant::Link, Mode::View);
+    let seen = a1.next_of_members(4);
+    let people: Vec<Value> = seen["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .map(|m| m["person"].clone())
+        .collect();
+    assert!(people[0].is_string());
+    assert_eq!(people[0], people[1], "two tabs, one person");
+    assert_ne!(people[0], people[2]);
+    assert_eq!(people[3], Value::Null, "link holders have none");
+
+    let mut link = join(&hub, doc, Participant::Link, Mode::View);
+    let hello = link.next();
+    for member in hello["members"].as_array().expect("members") {
+        assert!(
+            member.get("person").is_none(),
+            "a link holder sees no person keys"
+        );
+    }
+
+    let other = Uuid::new_v4();
+    let mut elsewhere = join(&hub, other, user("a"), Mode::Edit);
+    let hello = elsewhere.next();
+    assert_ne!(
+        hello["members"][0]["person"], people[0],
+        "another room, another key"
+    );
 }

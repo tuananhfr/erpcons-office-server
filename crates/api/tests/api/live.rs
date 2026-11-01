@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use crate::{
     live_support::{connect, join, link_ticket, wait_members},
     people::{enable_link, owner, share_ok, sign_in, upload},
-    support::{TestApp, docx, etag, expect_error, ok_json},
+    support::{TestApp, docx, etag, expect_error, expect_not_leader, ok_json},
 };
 
 pub const B_EMAIL: &str = "b.editor@erpcons.test";
@@ -48,7 +48,10 @@ async fn members_join_see_each_other_and_leave() {
 
     let (wb, hello_b) = join(&app, &b, &doc).await;
     assert_eq!(hello_b["mode"], "edit");
+    assert_eq!(hello_b["limits"]["max_editors"], 10);
+    assert_eq!(hello_b["limits"]["max_connections"], 50);
     let seen = wa.presence_of(2).await;
+    assert_ne!(seen["members"][0]["person"], seen["members"][1]["person"]);
     assert_eq!(
         names(&seen),
         [Some(DEFAULT_NAME.into()), Some("Bình".into())]
@@ -68,6 +71,17 @@ async fn members_join_see_each_other_and_leave() {
     wc.vanish();
     let seen = wa.presence_of(1).await;
     assert_eq!(seen["members"][0]["id"], hello["you"]);
+    let (wa2, hello_a2) = join(&app, &a, &doc).await;
+    let both = hello_a2["members"].as_array().expect("members");
+    assert_eq!(
+        both[0]["person"], both[1]["person"],
+        "one account in two tabs"
+    );
+    assert!(
+        !both[0]["person"].as_str().expect("person").contains("usr_"),
+        "never the account id"
+    );
+    wa2.vanish();
     wait_members(&app, &doc, 1).await;
 }
 
@@ -113,8 +127,9 @@ async fn while_several_edit_only_the_leader_saves_and_it_hands_over() {
     let (wb, hello_b) = join(&app, &b, &doc).await;
     assert_eq!(wa.next_of("leader").await["leader"], hello_b["you"]);
     let refused = app.put_content(&a, &doc, Some(&tag), docx("a1")).await;
-    let body = expect_error(refused, 409, "NOT_LEADER", false).await;
+    let body = expect_not_leader(refused).await;
     assert!(body.get("latest_version").is_none());
+    assert_eq!(body["leader"], hello_b["you"], "whom to wait for");
     let saved = app.put_content(&b, &doc, Some(&tag), docx("b2")).await;
     assert_eq!(saved.status(), 200);
     let tag = etag(&saved);

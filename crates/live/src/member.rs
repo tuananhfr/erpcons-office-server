@@ -73,6 +73,8 @@ pub enum PresenceState {
 
 pub(crate) struct Member {
     pub participant: Participant,
+    /// The account's key in this room (`person`); `None` for link holders.
+    pub person: Option<String>,
     pub colour: &'static str,
     /// What the member's role allows.
     pub allowed: Mode,

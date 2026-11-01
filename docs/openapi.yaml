@@ -562,8 +562,8 @@ paths:
         version made by someone else, an older base) answers 409.
 
         **Live room.** While the document's live room has more than one member editing, only the leader's account may
-        save; anyone else gets 409 `NOT_LEADER` (checked after access and after the repeated-save rule, before any
-        byte is stored). The leader sends `X-Live-Seq`; see **Live channel**, *Saves*.
+        save; anyone else gets 409 `NOT_LEADER` with `leader`, the leader's member id (checked after access and after
+        the repeated-save rule, before any byte is stored). The leader sends `X-Live-Seq`; see **Live channel**, *Saves*.
       parameters:
         - name: If-Match
           in: header
@@ -1438,6 +1438,10 @@ components:
         name:
           type: string
           description: PI display name. Absent for link holders, for a user whose name PI did not give, and in everything a link holder receives.
+        person:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{22}$'
+          description: 'Opaque key of the account in this room: the same for every connection (tab) of one account, so the editor can group them; HMAC under a random per-room key, so it never reveals the account and differs in every room (and after a room is reopened). Absent for link holders and in everything a link holder receives.'
         colour: { type: string, pattern: '^#[0-9a-f]{6}$' }
         mode: { $ref: '#/components/schemas/LiveMode' }
         state: { type: string, enum: [active, idle] }
@@ -1466,8 +1470,10 @@ components:
         members: { type: array, items: { $ref: '#/components/schemas/LiveMember' } }
         limits:
           type: object
-          required: [max_message_bytes, max_region_message_bytes, messages_per_second, ping_secs]
+          required: [max_editors, max_connections, max_message_bytes, max_region_message_bytes, messages_per_second, ping_secs]
           properties:
+            max_editors: { type: integer, description: Members that may edit at once (10); the rest join in view mode with `notice` `editor_limit`. }
+            max_connections: { type: integer, description: Connections the room takes in all (50). }
             max_message_bytes: { type: integer, description: Largest message but `region.update` (16 KiB). }
             max_region_message_bytes:
               type: integer
@@ -1763,6 +1769,9 @@ components:
               - type: object
                 properties:
                   latest_version: { type: integer, minimum: 1, description: '`VERSION_CONFLICT` only.' }
+                  leader:
+                    type: string
+                    description: '`NOT_LEADER` only: the room leader''s member id (as in `hello.leader`), when the room has one. `retryable` stays false: the client waits for that member''s save or for `leader` to name it.'
     Conflict:
       description: '`NAME_TAKEN`: a folder with that name already exists in the same parent.'
       content:

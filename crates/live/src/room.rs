@@ -7,7 +7,10 @@ mod editing;
 
 use std::{collections::BTreeMap, net::IpAddr, sync::Arc};
 
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use ring::hmac;
 use tokio::sync::mpsc::{self, error::TrySendError};
+use uuid::Uuid;
 
 pub(crate) use editing::Replay;
 
@@ -34,6 +37,9 @@ pub(crate) struct Room {
     pending_announce: bool,
     /// The lock table changed; the members have not been told yet.
     locks_changed: bool,
+    /// Keys `person`: the same account's connections share one, unlinkable to the account or to
+    /// any other room.
+    person_key: hmac::Key,
 }
 
 impl Room {
@@ -49,11 +55,16 @@ impl Room {
             removed: Vec::new(),
             pending_announce: false,
             locks_changed: false,
+            person_key: hmac::Key::new(hmac::HMAC_SHA256, &random_salt()),
         }
     }
 
     pub fn seq(&self) -> u64 {
         self.seq
+    }
+
+    pub fn leader(&self) -> Option<MemberId> {
+        self.leader
     }
 
     pub fn len(&self) -> usize {
@@ -89,10 +100,12 @@ impl Room {
     ) {
         let colour = palette::pick(self.members.values().map(|m| m.colour));
         let slot = allowed == Mode::Edit && self.slots_used() < config.max_editors;
+        let person = participant.actor_id().map(|actor| self.person_of(actor));
         self.members.insert(
             id,
             Member {
                 participant,
+                person,
                 colour,
                 allowed,
                 slot,
@@ -300,6 +313,11 @@ impl Room {
                 } else {
                     None
                 },
+                person: if with_names {
+                    m.person.as_deref()
+                } else {
+                    None
+                },
                 colour: m.colour,
                 mode: m.mode(),
                 state: m.state,
@@ -323,6 +341,8 @@ impl Room {
             leader: self.leader,
             members: &views,
             limits: Limits {
+                max_editors: config.max_editors,
+                max_connections: config.max_per_document,
                 max_message_bytes: config.max_message_bytes,
                 max_region_message_bytes: config.frame_limit(member.allowed),
                 messages_per_second: config.messages_per_second,
@@ -350,6 +370,13 @@ impl Room {
     fn broadcast_leader(&mut self, except: Option<MemberId>) {
         let text: Arc<str> = protocol::leader(self.seq, self.leader).into();
         self.broadcast(&text, except);
+    }
+
+    /// A short opaque key for `actor` in this room: HMAC-SHA256 under the room's random key, 16
+    /// bytes in base64url.
+    fn person_of(&self, actor: &str) -> String {
+        let tag = hmac::sign(&self.person_key, actor.as_bytes());
+        URL_SAFE_NO_PAD.encode(&tag.as_ref()[..16])
     }
 
     /// The lock table as members see it, under a new seq.
@@ -421,6 +448,14 @@ impl Room {
             }
         }
     }
+}
+
+/// 32 random bytes; from the system source through `uuid`, which cannot fail.
+fn random_salt() -> [u8; 32] {
+    let mut salt = [0u8; 32];
+    salt[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+    salt[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+    salt
 }
 
 /// Link holders are strangers to the room: they see colours and modes, never names.

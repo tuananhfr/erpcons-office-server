@@ -209,6 +209,11 @@ impl Hub {
             .is_none_or(|room| room.may_save(actor_id))
     }
 
+    /// The document room's leader, if any.
+    pub fn leader(&self, document: Uuid) -> Option<MemberId> {
+        self.lock().rooms.get(&document).and_then(Room::leader)
+    }
+
     /// Ends every session (`bye` "shutdown") and refuses new ones.
     pub fn shutdown(&self) {
         self.shutdown.cancel();

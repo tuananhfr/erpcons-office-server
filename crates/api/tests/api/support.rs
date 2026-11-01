@@ -413,6 +413,14 @@ pub async fn expect_error(response: Response, status: u16, code: &str, retryable
     body
 }
 
+/// A 409 `NOT_LEADER`, which names the leader when the room has one.
+pub async fn expect_not_leader(response: Response) -> Value {
+    let body = error_body(response, 409, "NOT_LEADER", false).await;
+    let extra = usize::from(body.get("leader").is_some());
+    assert_eq!(body.as_object().map(|o| o.len()), Some(4 + extra), "{body}");
+    body
+}
+
 /// An `INVALID_REQUEST` naming the sign-up field at fault.
 pub async fn expect_field_error(response: Response, field: &str) {
     let body = error_body(response, 422, "INVALID_REQUEST", false).await;

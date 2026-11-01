@@ -10,7 +10,7 @@ use crate::{
     live::{B_EMAIL, shared_document},
     live_support::{Ws, join},
     people::{dialog, patch_permission, permission_of},
-    support::{TestApp, docx, etag, expect_error},
+    support::{TestApp, docx, etag, expect_error, expect_not_leader},
 };
 
 fn acquire(region: &str, cid: &str) -> Value {
@@ -259,7 +259,8 @@ async fn a_full_log_asks_the_leader_to_save_and_its_save_trims_the_log() {
 
     // Only the leader's account may save while two edit; its X-Live-Seq trims the log.
     let refused = save_live(&app, &a, &doc, &tag, &last.to_string(), "a").await;
-    expect_error(refused, 409, "NOT_LEADER", false).await;
+    let body = expect_not_leader(refused).await;
+    assert!(body["leader"].is_string());
     let ok = save_live(&app, &b, &doc, &tag, &last.to_string(), "b").await;
     assert_eq!(ok.status(), 200);
     let note = wa.next_of("saved").await;

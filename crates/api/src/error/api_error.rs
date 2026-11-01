@@ -21,6 +21,7 @@ pub struct ApiError {
     retry_after_secs: Option<u64>,
     latest_version: Option<i32>,
     field: Option<&'static str>,
+    leader: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -33,6 +34,8 @@ struct ErrorBody<'a> {
     latest_version: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     field: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    leader: Option<String>,
 }
 
 impl ApiError {
@@ -42,6 +45,7 @@ impl ApiError {
             retry_after_secs: None,
             latest_version: None,
             field: None,
+            leader: None,
         }
     }
 
@@ -61,6 +65,14 @@ impl ApiError {
         Self {
             latest_version: Some(latest_version),
             ..Self::new(ErrorCode::VersionConflict)
+        }
+    }
+
+    /// 409 `NOT_LEADER` naming the live room's leader (a member id), when there is one.
+    pub fn not_leader(leader: Option<String>) -> Self {
+        Self {
+            leader,
+            ..Self::new(ErrorCode::NotLeader)
         }
     }
 
@@ -142,6 +154,7 @@ impl IntoResponse for ApiError {
             retryable: self.code.retryable(),
             latest_version: self.latest_version,
             field: self.field,
+            leader: self.leader,
         };
         let mut response = (self.code.status(), Json(body)).into_response();
         let headers = response.headers_mut();

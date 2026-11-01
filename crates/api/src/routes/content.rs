@@ -8,6 +8,7 @@ use axum::{
     response::Response,
 };
 use futures_util::TryStreamExt;
+use office_documents::DocError;
 use tokio_util::io::StreamReader;
 use uuid::Uuid;
 
@@ -44,10 +45,19 @@ pub(crate) async fn put(
     let live_seq = live_seq(&headers)?;
     let _slot = upload_slot(&state, &actor.actor_id)?;
     let reader = StreamReader::new(body.into_data_stream().map_err(io::Error::other));
-    let doc = state
+    let doc = match state
         .docs
         .save_content(&caller(&actor, &rid), id, &tags, live_seq, Box::pin(reader))
-        .await?;
+        .await
+    {
+        Ok(doc) => doc,
+        // The leader as of now, so the client knows whom to wait for.
+        Err(DocError::NotLeader) => {
+            let leader = state.live.leader(id).map(|m| m.to_string());
+            return Err(ApiError::not_leader(leader));
+        }
+        Err(e) => return Err(e.into()),
+    };
     Ok(respond::document(StatusCode::OK, &doc))
 }
 
