@@ -83,6 +83,14 @@ impl Room {
         self.members.is_empty()
     }
 
+    /// Members whose role allows only viewing, link holders included.
+    pub fn viewers(&self) -> usize {
+        self.members
+            .values()
+            .filter(|m| m.allowed == Mode::View)
+            .count()
+    }
+
     /// Members who came through the public link.
     pub fn links(&self) -> usize {
         self.members

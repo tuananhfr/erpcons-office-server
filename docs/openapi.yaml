@@ -189,8 +189,8 @@ info:
     more than 3 `region.replay` at once (then one per 5 s). Presence changes past 3 at once (then one per 2 s) are
     ignored, and a room shows at most 64 characters of a name. A document holds at most 50 connections (`error` `ROOM_FULL`, close 4029); at most 10 of them edit, and an
     editor past that joins in `view` mode with `notice` `editor_limit` until a slot frees (then `mode` `edit`); at
-    most 30 of them came through the public link (`ROOM_FULL` past that), so people it is shared with always find
-    room. One account holds at most 20 connections and one client network (an IPv4 address, or the /56 of an IPv6
+    most 30 of them came through the public link and at most 40 may only view (viewers and link holders;
+    `ROOM_FULL` past either), so people it is shared with, and those who edit, always find room. One account holds at most 20 connections and one client network (an IPv4 address, or the /56 of an IPv6
     address) 100 (`TOO_MANY_CONNECTIONS`), the server 5000 (`SERVER_BUSY`); the network and server limits are
     configurable. The server pings every 20 s; a connection
     silent for 30 s has left (`bye` `timeout`, close 4000). A client that does not keep up with its messages is

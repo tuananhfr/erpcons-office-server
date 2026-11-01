@@ -57,6 +57,9 @@ pub struct LiveConfig {
     /// Of those, members who came through the public link; the rest stay for people it is shared
     /// with.
     pub max_links_per_document: usize,
+    /// Connections of a document that may only view (viewers and link holders), so one viewer
+    /// account and the link holders cannot keep its editors out.
+    pub max_viewers_per_document: usize,
     /// Members past this who may edit join in view mode, told so, until a slot frees.
     pub max_editors: usize,
     /// Connections from one client network (an IPv6 client by its /56).
@@ -105,6 +108,7 @@ impl Default for LiveConfig {
             messages_per_second: 10.0,
             max_per_document: 50,
             max_links_per_document: 30,
+            max_viewers_per_document: 40,
             max_editors: 10,
             // Offices share one public address behind NAT.
             max_per_address: 100,

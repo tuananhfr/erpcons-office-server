@@ -441,3 +441,30 @@ async fn presence_changes_have_a_small_allowance_of_their_own() {
         "the sender stays"
     );
 }
+
+#[tokio::test]
+async fn people_who_only_view_cannot_lock_editors_out_of_a_room() {
+    let Some(app) = TestApp::spawn().await else {
+        return;
+    };
+    let (a, b, c, doc, _) = shared_document(&app).await;
+    let link = enable_link(&app, &a, &doc).await;
+    let mut open = Vec::new();
+    for _ in 0..30 {
+        let mut ws = join_link(&app, &link, &doc).await;
+        ws.next_of("hello").await;
+        open.push(ws);
+    }
+    for _ in 0..10 {
+        let (ws, _) = join(&app, &c, &doc).await;
+        open.push(ws);
+    }
+    let t = ticket(&app, &c, &doc).await;
+    let ended = connect(&app, &doc, &t).await.ended().await;
+    assert_eq!(ended.said.as_deref(), Some("ROOM_FULL"), "40 only view");
+    for who in [&a, &b] {
+        let (ws, hello) = join(&app, who, &doc).await;
+        assert_eq!(hello["mode"], "edit");
+        open.push(ws);
+    }
+}

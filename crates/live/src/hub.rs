@@ -99,7 +99,9 @@ impl Hub {
             .or_insert_with(|| Room::new(base));
         let links_full = matches!(participant, Participant::Link)
             && room.links() >= self.config.max_links_per_document;
-        if room.len() >= self.config.max_per_document || links_full {
+        let viewers_full =
+            allowed == Mode::View && room.viewers() >= self.config.max_viewers_per_document;
+        if room.len() >= self.config.max_per_document || links_full || viewers_full {
             if room.is_empty() {
                 state.rooms.remove(&document);
             }
