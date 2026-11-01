@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::IpAddr;
 
 /// The client as the per-address limits see it, set on the request by the per-IP layer. `None`
 /// collects requests whose address is unknown into one shared bucket.
@@ -6,23 +6,10 @@ use std::net::{IpAddr, Ipv6Addr};
 pub(crate) struct ClientKey(pub Option<IpAddr>);
 
 impl ClientKey {
+    /// IPv6 by its /56, as the live quotas count: a subscriber is usually delegated a /56 and could
+    /// take a fresh /64 for every request. IPv4-mapped IPv6 counts as the IPv4 address it carries.
     pub(crate) fn of(ip: Option<IpAddr>) -> Self {
-        Self(ip.map(network_of))
-    }
-}
-
-/// IPv6 by its /64: one subscriber usually holds a whole /64 and could take a fresh address for
-/// every request. IPv4-mapped IPv6 counts as the IPv4 address it carries.
-fn network_of(ip: IpAddr) -> IpAddr {
-    match ip {
-        IpAddr::V4(_) => ip,
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => IpAddr::V4(v4),
-            None => {
-                let prefix = u128::from(v6) & !((1u128 << 64) - 1);
-                IpAddr::V6(Ipv6Addr::from(prefix))
-            }
-        },
+        Self(office_live::quota_network(ip))
     }
 }
 
@@ -35,13 +22,19 @@ mod tests {
     }
 
     #[test]
-    fn ipv6_addresses_of_one_64_share_a_key() {
+    fn ipv6_addresses_of_one_56_share_a_key_as_in_the_live_quotas() {
         assert_eq!(
-            key("2001:db8:1:2::1"),
-            key("2001:db8:1:2:ffff:ffff:ffff:ffff")
+            key("2001:db8:1:200::1"),
+            key("2001:db8:1:2ff:ffff:ffff:ffff:ffff")
         );
-        assert_ne!(key("2001:db8:1:2::1"), key("2001:db8:1:3::1"));
-        assert_eq!(key("2001:db8:1:2::1"), key("2001:db8:1:2::"));
+        assert_ne!(key("2001:db8:1:200::1"), key("2001:db8:1:300::1"));
+        for ip in ["2001:db8:1:2ab::9", "::ffff:203.0.113.1", "203.0.113.1"] {
+            let ip: IpAddr = ip.parse().expect("ip");
+            assert_eq!(
+                ClientKey::of(Some(ip)).0,
+                office_live::quota_network(Some(ip))
+            );
+        }
     }
 
     #[test]

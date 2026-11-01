@@ -144,7 +144,7 @@ async fn declared_oversized_body_is_413() {
 }
 
 #[tokio::test]
-async fn ipv6_clients_are_limited_by_their_64() {
+async fn ipv6_clients_are_limited_by_their_56() {
     let Some(app) = TestApp::spawn_with(|s| {
         s.api.ip_rate = RateConfig {
             burst: 1,
@@ -156,13 +156,13 @@ async fn ipv6_clients_are_limited_by_their_64() {
     else {
         return;
     };
-    assert_eq!(health_from(&app, "2001:db8:1:2::1").await, 200);
+    assert_eq!(health_from(&app, "2001:db8:1:200::1").await, 200);
     assert_eq!(
-        health_from(&app, "2001:db8:1:2::ffff").await,
+        health_from(&app, "2001:db8:1:2ff::ffff").await,
         429,
-        "another address of the same /64 shares the bucket"
+        "another /64 of the same /56 shares the bucket"
     );
-    assert_eq!(health_from(&app, "2001:db8:1:3::1").await, 200);
+    assert_eq!(health_from(&app, "2001:db8:1:300::1").await, 200);
 }
 
 /// A PDF of exactly `len` bytes.

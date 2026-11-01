@@ -69,7 +69,7 @@ info:
     per-file limit in `Me.quota.max_file_bytes`.
 
     **Rate limits.** Any authenticated operation may answer 429 `RATE_LIMITED` (retryable, with `Retry-After`): per
-    client address (an IPv6 client counts by its /64), per actor, per client address for token checks that need a
+    client address (an IPv6 client counts by its /56), per actor, per client address for token checks that need a
     signature check (a token already verified and cached, or refused by its form alone, does not count), and per actor
     for uploads and saves streaming at the same time (a few at once), and per actor for comment writes (every comment
     operation but the two reads: 30 at once, then one per 2 s; configurable).
@@ -1035,7 +1035,7 @@ paths:
         over many holders or networks so never pushes out anyone else's. A request whose client address is unknown
         answers 503.
 
-        Issuing is rate limited (429 `RATE_LIMITED`, `Retry-After`) per client address (an IPv6 client by its /64; 300
+        Issuing is rate limited (429 `RATE_LIMITED`, `Retry-After`) per client address (an IPv6 client by its /56; 300
         at once, then 30 a second), per account (120, then 10 a second) and, with `X-Link-Token`, per client address
         for public links (60, then 2 a second). Known residual risk: when every network in a cap holds a single
         ticket, a newcomer is refused rather than pushing anyone out. Keeping one owner's public links full that way
