@@ -188,22 +188,18 @@ impl Documents {
             .map_err(DocError::db)?
             .ok_or(DocError::NotFound)?;
         Ok(Content {
-            reader: self.open_object(id, content.opaque_key).await?,
+            reader: self.open_object(content.opaque_key).await?,
             size: u64::try_from(content.size).unwrap_or(0),
             version: content.version,
             etag: content.etag,
         })
     }
 
-    pub(super) async fn open_object(
-        &self,
-        id: Uuid,
-        opaque_key: String,
-    ) -> Result<ObjectReader, DocError> {
+    pub(super) async fn open_object(&self, opaque_key: String) -> Result<ObjectReader, DocError> {
         match self.storage.get(&ObjectKey::new(opaque_key)).await {
             Ok(reader) => Ok(reader),
             Err(StorageError::NotFound) => {
-                error!(document_id = %id, "bytes of a version are missing");
+                error!("bytes of a version are missing");
                 Err(DocError::Unavailable)
             }
             Err(e) => Err(DocError::storage(e)),

@@ -27,7 +27,7 @@ impl Documents {
             .map_err(DocError::db)?
             .ok_or(DocError::NotFound)?;
         Ok(Content {
-            reader: self.open_object(id, version.opaque_key).await?,
+            reader: self.open_object(version.opaque_key).await?,
             size: u64::try_from(version.bytes).unwrap_or(0),
             version: seq,
             etag: String::new(),

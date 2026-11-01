@@ -75,7 +75,7 @@ impl Document {
         let format = Format::from_mime(&r.mime)
             .filter(|f| f.kind().as_str() == r.kind)
             .ok_or_else(|| {
-                tracing::error!(document_id = %r.id, "document has an unknown format");
+                tracing::error!("document has an unknown format");
                 DocError::Unavailable
             })?;
         Ok(Self {

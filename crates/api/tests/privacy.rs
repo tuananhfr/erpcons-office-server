@@ -85,6 +85,7 @@ async fn tokens_and_names_stay_out_of_logs_and_audit() {
     let (canaries, doc_id) = touch_documents(&app, &token).await;
     let shared = share_and_link(&app, &token, &doc_id).await;
     let signed_up = sign_up(&app).await;
+    read_lost_bytes(&app, &token, &doc_id).await;
     assert_eq!(app.get_as("/api/v1/me", rejected).await.status(), 401);
     // A key PI rotated in while it is down cannot be fetched: the check is unavailable.
     app.pi.rotate("2027-04", true);
@@ -100,6 +101,14 @@ async fn tokens_and_names_stay_out_of_logs_and_audit() {
     assert!(
         text.contains("live session ended"),
         "live sessions are logged: {text}"
+    );
+    assert!(
+        text.contains("bytes of a version are missing"),
+        "lost bytes are logged: {text}"
+    );
+    assert!(
+        text.contains("document has an unknown format"),
+        "a corrupt format is logged: {text}"
     );
     assert!(
         !text.contains(&doc_id),
@@ -200,6 +209,36 @@ async fn touch_documents(app: &TestApp, token: &str) -> ([&'static str; 5], Stri
         .await;
     assert_eq!(saved.status(), 200);
     (CANARIES, doc_id.to_owned())
+}
+
+/// Loses every stored object, then corrupts the format, reading the document after each: answered
+/// 503 and logged.
+async fn read_lost_bytes(app: &TestApp, token: &str, doc_id: &str) {
+    fn remove_files(dir: &std::path::Path) {
+        for entry in std::fs::read_dir(dir).expect("store").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                remove_files(&path);
+            } else {
+                std::fs::remove_file(&path).expect("remove object");
+            }
+        }
+    }
+    remove_files(&app.store_dir());
+    let read = app
+        .get_as(&format!("/api/v1/documents/{doc_id}/content"), token)
+        .await;
+    assert_eq!(read.status(), 503);
+
+    sqlx::query("UPDATE documents SET mime = 'application/x-unknown' WHERE id = $1::uuid")
+        .bind(doc_id)
+        .execute(app.pool())
+        .await
+        .expect("corrupt the format");
+    let read = app
+        .get_as(&format!("/api/v1/documents/{doc_id}"), token)
+        .await;
+    assert_eq!(read.status(), 503);
 }
 
 /// Shares by email (with an account and pending) and opens the public link; returns what must
