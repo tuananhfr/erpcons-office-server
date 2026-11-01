@@ -201,3 +201,26 @@ async fn a_binary_frame_gets_an_error() {
         .await;
     assert_eq!(wa.next_of("presence").await["members"][0]["state"], "idle");
 }
+
+#[tokio::test]
+async fn pongs_count_towards_the_message_rate() {
+    let Some(app) = TestApp::spawn_with(|s| {
+        s.api.live = LiveConfig {
+            message_burst: 3,
+            messages_per_second: 0.01,
+            ..LiveConfig::default()
+        };
+    })
+    .await
+    else {
+        return;
+    };
+    let (a, _, _, doc, _) = shared_document(&app).await;
+    let (mut wa, _) = join(&app, &a, &doc).await;
+    for _ in 0..4 {
+        wa.send_frame(Message::Pong(Vec::new().into())).await;
+    }
+    let ended = wa.ended().await;
+    assert_eq!(ended.said.as_deref(), Some("rate_limited"));
+    assert_eq!(ended.code, Some(4008));
+}

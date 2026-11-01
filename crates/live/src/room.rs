@@ -1,7 +1,7 @@
 //! One document's room: members in join order, the change sequence, editor slots, the leader and
 //! the lock table. Every change sends what it changed to the members it concerns; a member whose
 //! queue is full or whose session is gone is removed, and [`Room::take_removed`] hands it back.
-use std::{collections::BTreeMap, net::IpAddr};
+use std::{collections::BTreeMap, net::IpAddr, sync::Arc};
 
 use tokio::sync::mpsc::{self, error::TrySendError};
 
@@ -220,7 +220,8 @@ impl Room {
             })
             .collect();
         for (id, mode, notice) in changed {
-            self.deliver(id, Event::Send(protocol::mode(self.seq, mode, notice)));
+            let text = protocol::mode(self.seq, mode, notice);
+            self.deliver(id, Event::Send(text.into()));
         }
         let leader_changed = self.update_leader();
         self.broadcast_presence(None);
@@ -290,12 +291,12 @@ impl Room {
                 ping_secs: config.ping_interval.as_secs(),
             },
         });
-        self.deliver(id, Event::Send(text));
+        self.deliver(id, Event::Send(text.into()));
     }
 
     fn broadcast_presence(&mut self, except: Option<MemberId>) {
-        let named = protocol::presence(self.seq, &self.views(true));
-        let anonymous = protocol::presence(self.seq, &self.views(false));
+        let named: Arc<str> = protocol::presence(self.seq, &self.views(true)).into();
+        let anonymous: Arc<str> = protocol::presence(self.seq, &self.views(false)).into();
         let targets: Vec<(MemberId, bool)> = self
             .members
             .iter()
@@ -304,12 +305,12 @@ impl Room {
             .collect();
         for (id, names) in targets {
             let text = if names { &named } else { &anonymous };
-            self.deliver(id, Event::Send(text.clone()));
+            self.deliver(id, Event::Send(Arc::clone(text)));
         }
     }
 
     fn broadcast_leader(&mut self, except: Option<MemberId>) {
-        let text = protocol::leader(self.seq, self.leader);
+        let text: Arc<str> = protocol::leader(self.seq, self.leader).into();
         let targets: Vec<MemberId> = self
             .members
             .keys()
@@ -317,7 +318,7 @@ impl Room {
             .filter(|id| Some(*id) != except)
             .collect();
         for id in targets {
-            self.deliver(id, Event::Send(text.clone()));
+            self.deliver(id, Event::Send(Arc::clone(&text)));
         }
     }
 

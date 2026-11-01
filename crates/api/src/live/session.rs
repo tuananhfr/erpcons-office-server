@@ -98,7 +98,7 @@ pub(crate) async fn run(mut socket: WebSocket, session: Session) {
                 }
                 event = events.recv() => match event {
                     Some(Event::Send(text)) => {
-                        if send(&mut socket, text, grace).await.is_err() {
+                        if send(&mut socket, String::from(&*text), grace).await.is_err() {
                             break End::Gone;
                         }
                     }
@@ -159,8 +159,8 @@ async fn on_frame(
 ) -> Option<End> {
     let message = match frame {
         Message::Close(_) => return Some(End::Gone),
-        Message::Pong(_) => return None,
-        Message::Ping(_) => None,
+        // Pongs answer our pings, but unasked ones must not flood the session for free.
+        Message::Ping(_) | Message::Pong(_) => None,
         Message::Text(text) => Some(protocol::parse(text.as_str())),
         Message::Binary(_) => Some(Err(LiveErrorCode::InvalidMessage)),
     };
