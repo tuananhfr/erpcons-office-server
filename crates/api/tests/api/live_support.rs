@@ -57,22 +57,6 @@ pub async fn refused(app: &TestApp, doc: &str, ticket: &str) -> u16 {
     }
 }
 
-/// The HTTP status a refused upgrade answered, for a client the proxy saw at `from`.
-pub async fn refused_from(app: &TestApp, doc: &str, ticket: &str, from: &str) -> u16 {
-    let mut request = live_url(app, doc, ticket)
-        .into_client_request()
-        .expect("request");
-    request.headers_mut().insert(
-        "x-forwarded-for",
-        HeaderValue::from_str(from).expect("address"),
-    );
-    match connect_async(request).await {
-        Err(WsError::Http(response)) => response.status().as_u16(),
-        Err(e) => panic!("unexpected error: {e}"),
-        Ok(_) => panic!("the upgrade was accepted"),
-    }
-}
-
 pub struct Ws {
     stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
 }

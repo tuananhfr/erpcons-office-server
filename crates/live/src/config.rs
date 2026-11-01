@@ -7,13 +7,13 @@ pub struct LiveConfig {
     pub ticket_ttl: Duration,
     /// Unredeemed tickets held at once, server-wide.
     pub max_tickets: usize,
-    /// Unredeemed tickets of one holder (account or public link), and from one client network (an
-    /// IPv6 client by its /56); a new one past either replaces that key's oldest, so nobody can
-    /// fill the store for everyone.
+    /// Unredeemed tickets of one holder (an account, or a public link from one client network); a
+    /// new one past this replaces the holder's own oldest.
     pub max_tickets_per_holder: usize,
+    /// Unredeemed tickets from one client network (an IPv6 client by its /56), and through the
+    /// public links of one owner's documents. Shared with others, so past either a new ticket is
+    /// refused rather than pushing out someone else's.
     pub max_tickets_per_address: usize,
-    /// Unredeemed tickets issued through the public links of one owner's documents, so links of
-    /// many documents cannot fill the store either.
     pub max_link_tickets_per_owner: usize,
     /// Largest message or frame a client may send.
     pub max_message_bytes: usize,

@@ -9,8 +9,7 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::{
     live::shared_document,
     live_support::{
-        Ws, connect, connect_from, join, join_link, refused, refused_from, ticket, ticket_path,
-        wait_members,
+        Ws, connect, connect_from, join, join_link, refused, ticket, ticket_path, wait_members,
     },
     people::{enable_link, upload},
     support::{TestApp, ok_json},
@@ -265,8 +264,40 @@ async fn a_link_holder_cannot_push_out_another_ones_tickets() {
     ws.next_of("hello").await;
 }
 
+/// A ticket request with `token` (a PI token, or a link's with `link`), from `from`.
+async fn ticket_request_from(
+    app: &TestApp,
+    token: &str,
+    link: bool,
+    doc: &str,
+    from: &str,
+) -> reqwest::Response {
+    let request = app.http.post(app.url(&ticket_path(doc)));
+    let request = if link {
+        request.header("x-link-token", token)
+    } else {
+        request.bearer_auth(token)
+    };
+    request
+        .header("x-forwarded-for", from)
+        .send()
+        .await
+        .expect("ticket")
+}
+
+async fn expect_refused_ticket(response: reqwest::Response) {
+    assert_eq!(response.status(), 503);
+    assert_eq!(
+        response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+        Some("1")
+    );
+}
+
 #[tokio::test]
-async fn ipv6_clients_share_quotas_by_their_56() {
+async fn a_full_ipv6_56_refuses_new_tickets_without_pushing_out_others() {
     let Some(app) = TestApp::spawn_with(|s| {
         s.api.trust_forwarded_for = true;
         s.api.live = LiveConfig {
@@ -279,28 +310,35 @@ async fn ipv6_clients_share_quotas_by_their_56() {
     else {
         return;
     };
-    let (a, _, _, doc, _) = shared_document(&app).await;
-    let link = enable_link(&app, &a, &doc).await;
+    let (a, b, _, doc, _) = shared_document(&app).await;
     let from = [
         "2001:db8:0:100::1",
         "2001:db8:0:1ff::1",
         "2001:db8:0:1a0::1",
     ];
-    let mut issued = Vec::new();
-    for address in from {
-        issued.push(link_ticket_from(&app, &link, &doc, address).await);
-    }
-    assert_eq!(
-        refused_from(&app, &doc, &issued[0], from[0]).await,
-        401,
-        "the oldest ticket of the /56 went"
-    );
-    let mut second = connect_from(&app, &doc, &issued[1], from[1]).await;
-    second.next_of("hello").await;
-    let mut third = connect_from(&app, &doc, &issued[2], from[2]).await;
-    third.next_of("hello").await;
-    let fourth = link_ticket_from(&app, &link, &doc, "2001:db8:0:1b0::1").await;
-    let ended = connect_from(&app, &doc, &fourth, "2001:db8:0:1b0::1")
+    let response = ticket_request_from(&app, &b, false, &doc, from[0]).await;
+    let b_ticket = ok_json(response, 200).await["ticket"]
+        .as_str()
+        .expect("ticket")
+        .to_owned();
+    let response = ticket_request_from(&app, &a, false, &doc, from[1]).await;
+    let a_ticket = ok_json(response, 200).await["ticket"]
+        .as_str()
+        .expect("ticket")
+        .to_owned();
+    expect_refused_ticket(ticket_request_from(&app, &a, false, &doc, from[2]).await).await;
+    let mut wb = connect_from(&app, &doc, &b_ticket, from[0]).await;
+    wb.next_of("hello").await;
+    let mut wa = connect_from(&app, &doc, &a_ticket, from[1]).await;
+    wa.next_of("hello").await;
+
+    // Connections count by the /56 too.
+    let response = ticket_request_from(&app, &a, false, &doc, from[2]).await;
+    let third = ok_json(response, 200).await["ticket"]
+        .as_str()
+        .expect("ticket")
+        .to_owned();
+    let ended = connect_from(&app, &doc, &third, from[2])
         .await
         .ended()
         .await;
@@ -308,7 +346,7 @@ async fn ipv6_clients_share_quotas_by_their_56() {
 }
 
 #[tokio::test]
-async fn link_tickets_of_one_owner_are_capped_over_all_their_documents() {
+async fn link_tickets_of_one_owner_are_capped_without_pushing_out_others() {
     let Some(app) = TestApp::spawn_with(|s| {
         s.api.trust_forwarded_for = true;
         s.api.live = LiveConfig {
@@ -324,15 +362,16 @@ async fn link_tickets_of_one_owner_are_capped_over_all_their_documents() {
     let (other, _) = upload(&app, &a, "second").await;
     let link = enable_link(&app, &a, &doc).await;
     let other_link = enable_link(&app, &a, &other).await;
-    let first = link_ticket_from(&app, &link, &doc, "203.0.113.1").await;
-    let second = link_ticket_from(&app, &other_link, &other, "203.0.113.2").await;
-    let third = link_ticket_from(&app, &link, &doc, "203.0.113.3").await;
-    assert_eq!(refused_from(&app, &doc, &first, "203.0.113.1").await, 401);
-    let mut ws = connect_from(&app, &other, &second, "203.0.113.2").await;
+    let mine = link_ticket_from(&app, &link, &doc, "203.0.113.1").await;
+    let theirs = link_ticket_from(&app, &other_link, &other, "203.0.113.2").await;
+    expect_refused_ticket(ticket_request_from(&app, &link, true, &doc, "203.0.113.1").await).await;
+    expect_refused_ticket(ticket_request_from(&app, &link, true, &doc, "203.0.113.3").await).await;
+    let mut ws = connect_from(&app, &other, &theirs, "203.0.113.2").await;
     ws.next_of("hello").await;
-    let mut ws = connect_from(&app, &doc, &third, "203.0.113.3").await;
+    let mut ws = connect_from(&app, &doc, &mine, "203.0.113.1").await;
     ws.next_of("hello").await;
-    // An account's ticket is not a link ticket.
+    // Redeemed tickets make room; an account's ticket is not a link ticket.
+    link_ticket_from(&app, &link, &doc, "203.0.113.3").await;
     let (_wa, hello) = join(&app, &a, &doc).await;
     assert_eq!(hello["mode"], "edit");
 }
