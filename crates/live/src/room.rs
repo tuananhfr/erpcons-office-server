@@ -1,37 +1,59 @@
-//! One document's room: members in join order, the change sequence, editor slots, the leader and
-//! the lock table. Every change sends what it changed to the members it concerns; a member whose
-//! queue is full or whose session is gone is removed, and [`Room::take_removed`] hands it back.
+//! One document's room: members in join order, the change sequence, editor slots, the leader,
+//! the lock table and the log of updates since the last save. Every change sends what it changed
+//! to the members it concerns; a member whose queue is full or whose session is gone is removed,
+//! and [`Room::take_removed`] hands it back. Co-editing (locks, updates, cursors, replay, saves)
+//! is in `editing`.
+mod editing;
+
 use std::{collections::BTreeMap, net::IpAddr, sync::Arc};
 
 use tokio::sync::mpsc::{self, error::TrySendError};
 
+pub(crate) use editing::Replay;
+
 use crate::{
     ByeReason, Event, LiveConfig, LockTable, MemberId, Mode, Notice, Participant, PresenceState,
+    log::RoomLog,
     member::Member,
     palette,
-    protocol::{self, Hello, Limits, MemberView},
+    protocol::{self, Hello, Limits, LockView, MemberView},
 };
 
 pub(crate) struct Room {
     members: BTreeMap<MemberId, Member>,
+    /// Every change takes the next number; a room starts above every number this node issued
+    /// before, so a `seq` never means two things.
     seq: u64,
     leader: Option<MemberId>,
     locks: LockTable,
+    log: RoomLog,
+    /// The leader was asked to save since the last save; a new leader is asked again.
+    save_requested: bool,
     removed: Vec<Member>,
     /// A delivery failed and detached its member; the others have not been told yet.
     pending_announce: bool,
+    /// The lock table changed; the members have not been told yet.
+    locks_changed: bool,
 }
 
 impl Room {
-    pub fn new() -> Self {
+    /// An empty room whose numbering starts after `base`.
+    pub fn new(base: u64) -> Self {
         Self {
             members: BTreeMap::new(),
-            seq: 0,
+            seq: base,
             leader: None,
             locks: LockTable::default(),
+            log: RoomLog::new(base),
+            save_requested: false,
             removed: Vec::new(),
             pending_announce: false,
+            locks_changed: false,
         }
+    }
+
+    pub fn seq(&self) -> u64 {
+        self.seq
     }
 
     pub fn len(&self) -> usize {
@@ -83,11 +105,16 @@ impl Room {
         self.seq += 1;
         let leader_changed = self.update_leader();
         self.send_hello(config, id);
+        if !self.locks.is_empty() {
+            let text = self.locks_message();
+            self.deliver(id, Event::Send(text.into()));
+        }
         self.broadcast_presence(Some(id));
         if leader_changed {
             self.broadcast_leader(Some(id));
+            self.ask_new_leader();
         }
-        self.drop_unreachable(config);
+        self.settle(config);
     }
 
     pub fn remove(&mut self, config: &LiveConfig, id: MemberId) {
@@ -95,7 +122,7 @@ impl Room {
             let before = self.modes();
             self.after_change(config, before);
         }
-        self.drop_unreachable(config);
+        self.settle(config);
     }
 
     /// Ends the member's session with `reason`, then removes it.
@@ -120,7 +147,7 @@ impl Room {
             member.slot = false;
         }
         self.after_change(config, before);
-        self.drop_unreachable(config);
+        self.settle(config);
     }
 
     pub fn set_state(&mut self, config: &LiveConfig, id: MemberId, state: PresenceState) {
@@ -133,7 +160,7 @@ impl Room {
         member.state = state;
         self.seq += 1;
         self.broadcast_presence(None);
-        self.drop_unreachable(config);
+        self.settle(config);
     }
 
     /// Asks every session to read its member's role again. A burst of changes queues one recheck
@@ -149,7 +176,7 @@ impl Room {
         for id in ids {
             self.deliver(id, Event::Recheck);
         }
-        self.drop_unreachable(config);
+        self.settle(config);
     }
 
     /// The member's session took up its queued recheck; a change from now on queues another.
@@ -176,15 +203,15 @@ impl Room {
             .is_some_and(|leader| leader == actor_id)
     }
 
-    pub fn locks_mut(&mut self) -> &mut LockTable {
-        &mut self.locks
+    pub fn locks(&self) -> &LockTable {
+        &self.locks
     }
 
     /// Removes the member and what it held, without telling anyone yet.
     fn detach(&mut self, id: MemberId) -> bool {
         match self.members.remove(&id) {
             Some(member) => {
-                self.locks.release_member(id);
+                self.locks_changed |= self.locks.release_member(id);
                 self.removed.push(member);
                 true
             }
@@ -206,6 +233,16 @@ impl Room {
                 used += 1;
             }
         }
+        // Only editors hold locks: whoever may no longer edit lets go of them at once.
+        let not_editing: Vec<MemberId> = self
+            .members
+            .iter()
+            .filter(|(_, m)| m.mode() != Mode::Edit)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in not_editing {
+            self.locks_changed |= self.locks.release_member(id);
+        }
         self.seq += 1;
         let changed: Vec<(MemberId, Mode, Option<Notice>)> = self
             .modes()
@@ -224,6 +261,7 @@ impl Room {
         self.broadcast_presence(None);
         if leader_changed {
             self.broadcast_leader(None);
+            self.ask_new_leader();
         }
     }
 
@@ -280,10 +318,13 @@ impl Room {
             notice: member.notice(),
             colour: member.colour,
             seq: self.seq,
+            saved_seq: self.log.saved_seq(),
+            saved_version: self.log.saved_version(),
             leader: self.leader,
             members: &views,
             limits: Limits {
                 max_message_bytes: config.max_message_bytes,
+                max_region_message_bytes: config.frame_limit(member.allowed),
                 messages_per_second: config.messages_per_second,
                 ping_secs: config.ping_interval.as_secs(),
             },
@@ -308,6 +349,23 @@ impl Room {
 
     fn broadcast_leader(&mut self, except: Option<MemberId>) {
         let text: Arc<str> = protocol::leader(self.seq, self.leader).into();
+        self.broadcast(&text, except);
+    }
+
+    /// The lock table as members see it, under a new seq.
+    fn locks_message(&self) -> String {
+        let table: BTreeMap<&str, LockView> = self
+            .locks
+            .entries()
+            .filter_map(|(region, holder)| {
+                let colour = self.members.get(&holder)?.colour;
+                Some((region, LockView { holder, colour }))
+            })
+            .collect();
+        protocol::locks(self.seq, &table)
+    }
+
+    fn broadcast(&mut self, text: &Arc<str>, except: Option<MemberId>) {
         let targets: Vec<MemberId> = self
             .members
             .keys()
@@ -315,15 +373,37 @@ impl Room {
             .filter(|id| Some(*id) != except)
             .collect();
         for id in targets {
-            self.deliver(id, Event::Send(Arc::clone(&text)));
+            self.deliver(id, Event::Send(Arc::clone(text)));
         }
     }
 
-    /// Announces members detached by failed deliveries; announcing may detach more.
-    fn drop_unreachable(&mut self, config: &LiveConfig) {
-        while std::mem::take(&mut self.pending_announce) {
-            let before = self.modes();
-            self.after_change(config, before);
+    /// The leader changed while a save is wanted: the new one is asked.
+    fn ask_new_leader(&mut self) {
+        if self.save_requested {
+            self.request_save();
+        }
+    }
+
+    fn request_save(&mut self) {
+        if let Some(leader) = self.leader {
+            self.deliver(leader, Event::Send(protocol::save_request().into()));
+        }
+    }
+
+    /// Announces members detached by failed deliveries and lock changes; either may cause the
+    /// other.
+    fn settle(&mut self, config: &LiveConfig) {
+        loop {
+            if std::mem::take(&mut self.pending_announce) {
+                let before = self.modes();
+                self.after_change(config, before);
+            } else if std::mem::take(&mut self.locks_changed) {
+                self.seq += 1;
+                let text: Arc<str> = self.locks_message().into();
+                self.broadcast(&text, None);
+            } else {
+                break;
+            }
         }
     }
 

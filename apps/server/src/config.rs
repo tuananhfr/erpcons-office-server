@@ -170,6 +170,12 @@ impl ServerConfig {
                     "ERPCONS_LIVE_MAX_CONNECTIONS",
                     defaults.live.max_connections,
                 )?,
+                max_region_message_bytes: vars.positive(
+                    "ERPCONS_LIVE_MAX_REGION_BYTES",
+                    defaults.live.max_region_message_bytes,
+                )?,
+                max_log_bytes: vars
+                    .positive("ERPCONS_LIVE_MAX_LOG_BYTES", defaults.live.max_log_bytes)?,
                 ..defaults.live.clone()
             },
         };
@@ -542,10 +548,14 @@ mod tests {
             ("ERPCONS_RATE_VERIFY_PER_SEC", "0.25"),
             ("ERPCONS_LIVE_MAX_PER_ADDRESS", "7"),
             ("ERPCONS_LIVE_MAX_CONNECTIONS", "70"),
+            ("ERPCONS_LIVE_MAX_REGION_BYTES", "65536"),
+            ("ERPCONS_LIVE_MAX_LOG_BYTES", "1048576"),
         ])
         .expect("config");
         assert_eq!(c.api.live.max_per_address, 7);
         assert_eq!(c.api.live.max_connections, 70);
+        assert_eq!(c.api.live.max_region_message_bytes, 65536);
+        assert_eq!(c.api.live.max_log_bytes, 1048576);
         assert_eq!(c.api.live.max_editors, 10);
         assert_eq!(c.bind.port(), 8710);
         assert!(c.bind.ip().is_unspecified());
@@ -646,6 +656,8 @@ mod tests {
             ("ERPCONS_AUDIT_RETENTION_DAYS", "-1"),
             ("ERPCONS_LIVE_MAX_PER_ADDRESS", "0"),
             ("ERPCONS_LIVE_MAX_CONNECTIONS", "x"),
+            ("ERPCONS_LIVE_MAX_REGION_BYTES", "0"),
+            ("ERPCONS_LIVE_MAX_LOG_BYTES", "-1"),
         ] {
             assert_eq!(
                 load(&[bad]).err(),

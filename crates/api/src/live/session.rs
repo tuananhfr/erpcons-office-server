@@ -1,19 +1,27 @@
 //! One live connection: joins the room, forwards the room's events to the socket, applies what the
-//! client sends, pings, notices silence, and re-reads the member's role on every access change and
-//! periodically. Logs carry outcomes only, never ids, names or tickets.
-use std::{net::IpAddr, time::Duration};
+//! client sends, pings, notices silence, sweeps lapsed locks, and re-reads the member's role on
+//! every access change and periodically. Logs carry outcomes only, never ids, names, regions,
+//! payloads or tickets.
+use std::{net::IpAddr, sync::Arc, time::Duration};
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use office_documents::DocError;
 use office_live::{
-    ByeReason, CloseCode, Event, JoinRefused, Membership, MessageRate, Mode,
-    protocol::{self, ClientMessage, LiveErrorCode},
+    ByeReason, CloseCode, Event, JoinRefused, Membership, Mode,
+    protocol::{self, LiveErrorCode},
 };
-use tokio::time::{Instant, MissedTickBehavior, interval, interval_at, timeout};
+use tokio::{
+    sync::mpsc::{Receiver, error::TryRecvError},
+    time::{Instant, MissedTickBehavior, interval, interval_at, timeout},
+};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use super::{Viewer, viewer::mode_of};
+use super::{
+    Viewer,
+    inbound::{self, Budgets, Inbound},
+    viewer::mode_of,
+};
 use crate::AppState;
 
 /// A connection that passed its ticket and access check, about to join.
@@ -26,14 +34,19 @@ pub(crate) struct Session {
 }
 
 /// How a session ends.
-enum End {
+pub(super) enum End {
     /// The server says `bye` with a reason, then closes.
     Bye(ByeReason),
+    /// The server closes with this code and no `bye`.
+    Close(CloseCode),
     /// The client said `bye`.
     ClientBye,
     /// The connection is gone, or closed by the client.
     Gone,
 }
+
+/// Room events held back while a replay is written; more than this and the client is too slow.
+const MAX_HELD_EVENTS: usize = 4096;
 
 pub(crate) async fn run(mut socket: WebSocket, session: Session) {
     let hub = session.state.live.clone();
@@ -63,11 +76,7 @@ pub(crate) async fn run(mut socket: WebSocket, session: Session) {
     };
     let config = hub.config().clone();
     let grace = config.idle_timeout;
-    let mut rate = MessageRate::new(
-        config.message_burst,
-        config.messages_per_second,
-        std::time::Instant::now(),
-    );
+    let mut budgets = Budgets::new(&config, std::time::Instant::now());
     let mut last_heard = Instant::now();
     let mut last_ping = Instant::now();
     // Checks silence often enough that a dead client is noticed soon after the idle timeout.
@@ -78,6 +87,9 @@ pub(crate) async fn run(mut socket: WebSocket, session: Session) {
         config.recheck_interval,
     );
     recheck.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // Nothing else keeps time for the room: a lock lapses at most a fifth of its lease late.
+    let mut sweep = interval((config.lock_ttl / 5).max(Duration::from_millis(10)));
+    sweep.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let shutdown = hub.shutdown_token().clone();
 
     let end = 'session: {
@@ -92,26 +104,20 @@ pub(crate) async fn run(mut socket: WebSocket, session: Session) {
                         break End::Gone;
                     };
                     last_heard = Instant::now();
-                    if let Some(end) = on_frame(&mut socket, &membership, &mut rate, frame, grace).await {
+                    let inbound = inbound::on_frame(&membership, &mut budgets, &config, frame);
+                    if let Some(end) = answer(&mut socket, &session, &membership, &mut events, inbound, grace).await {
                         break end;
                     }
                 }
-                event = events.recv() => match event {
-                    Some(Event::Send(text)) => {
-                        if send(&mut socket, String::from(&*text), grace).await.is_err() {
-                            break End::Gone;
-                        }
+                event = events.recv() => {
+                    // `None`: the room dropped this member, it fell behind.
+                    let Some(event) = event else {
+                        break End::Bye(ByeReason::Overloaded);
+                    };
+                    if let Some(end) = on_event(&mut socket, &session, &membership, event, grace).await {
+                        break end;
                     }
-                    Some(Event::Close(reason)) => break End::Bye(reason),
-                    Some(Event::Recheck) => {
-                        membership.recheck_started();
-                        if let Some(end) = recheck_access(&session, &membership).await {
-                            break end;
-                        }
-                    }
-                    // The room dropped this member: it fell behind.
-                    None => break End::Bye(ByeReason::Overloaded),
-                },
+                }
                 _ = tick.tick() => {
                     if last_heard.elapsed() >= config.idle_timeout {
                         break End::Bye(ByeReason::Timeout);
@@ -123,6 +129,7 @@ pub(crate) async fn run(mut socket: WebSocket, session: Session) {
                         }
                     }
                 }
+                _ = sweep.tick() => membership.expire_locks(),
                 _ = recheck.tick() => {
                     if let Some(end) = recheck_access(&session, &membership).await {
                         break end;
@@ -144,40 +151,95 @@ pub(crate) async fn run(mut socket: WebSocket, session: Session) {
                 close(&mut socket, reason.close_code(), grace).await;
             }
         }
+        End::Close(code) => {
+            debug!(code = code.code(), "live session closed");
+            close(&mut socket, code, grace).await;
+        }
         End::ClientBye => close(&mut socket, CloseCode::Normal, grace).await,
         End::Gone => {}
     }
 }
 
-/// Applies one client frame; `Some` ends the session.
-async fn on_frame(
+/// Carries out what a client frame asked for; `Some` ends the session.
+async fn answer(
     socket: &mut WebSocket,
+    session: &Session,
     membership: &Membership,
-    rate: &mut MessageRate,
-    frame: Message,
+    events: &mut Receiver<Event>,
+    inbound: Inbound,
     grace: Duration,
 ) -> Option<End> {
-    let message = match frame {
-        Message::Close(_) => return Some(End::Gone),
-        // Pongs answer our pings, but unasked ones must not flood the session for free.
-        Message::Ping(_) | Message::Pong(_) => None,
-        Message::Text(text) => Some(protocol::parse(text.as_str())),
-        Message::Binary(_) => Some(Err(LiveErrorCode::InvalidMessage)),
-    };
-    if !rate.check(std::time::Instant::now()) {
-        let _ = send(socket, protocol::error(LiveErrorCode::RateLimited), grace).await;
-        return Some(End::Bye(ByeReason::RateLimited));
-    }
-    match message? {
-        Ok(ClientMessage::Presence(state)) => {
-            membership.set_state(state);
-            None
-        }
-        Ok(ClientMessage::Bye) => Some(End::ClientBye),
-        Err(code) => send(socket, protocol::error(code), grace)
+    match inbound {
+        Inbound::Continue => None,
+        Inbound::Refuse(code) => send(socket, protocol::error(code), grace)
             .await
             .err()
             .map(|()| End::Gone),
+        Inbound::RateLimited => {
+            let _ = send(socket, protocol::error(LiveErrorCode::RateLimited), grace).await;
+            Some(End::Bye(ByeReason::RateLimited))
+        }
+        Inbound::Send(messages) => {
+            let held = match write_through(socket, events, messages, grace).await {
+                Ok(held) => held,
+                Err(end) => return Some(end),
+            };
+            for event in held {
+                if let Some(end) = on_event(socket, session, membership, event, grace).await {
+                    return Some(end);
+                }
+            }
+            None
+        }
+        Inbound::End(end) => Some(end),
+    }
+}
+
+/// Writes `messages` (a replay, up to the room's whole log) straight to the socket, holding back
+/// the room's events meanwhile so the queue does not overflow; the held ones come after, in order.
+async fn write_through(
+    socket: &mut WebSocket,
+    events: &mut Receiver<Event>,
+    messages: Vec<Arc<str>>,
+    grace: Duration,
+) -> Result<Vec<Event>, End> {
+    let mut held = Vec::new();
+    for text in messages {
+        send(socket, String::from(&*text), grace)
+            .await
+            .map_err(|()| End::Gone)?;
+        loop {
+            match events.try_recv() {
+                Ok(event) => held.push(event),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return Err(End::Bye(ByeReason::Overloaded)),
+            }
+        }
+        if held.len() > MAX_HELD_EVENTS {
+            return Err(End::Bye(ByeReason::Overloaded));
+        }
+    }
+    Ok(held)
+}
+
+/// Carries out one room event; `Some` ends the session.
+async fn on_event(
+    socket: &mut WebSocket,
+    session: &Session,
+    membership: &Membership,
+    event: Event,
+    grace: Duration,
+) -> Option<End> {
+    match event {
+        Event::Send(text) => send(socket, String::from(&*text), grace)
+            .await
+            .err()
+            .map(|()| End::Gone),
+        Event::Close(reason) => Some(End::Bye(reason)),
+        Event::Recheck => {
+            membership.recheck_started();
+            recheck_access(session, membership).await
+        }
     }
 }
 

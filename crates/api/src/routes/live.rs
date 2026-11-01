@@ -115,12 +115,13 @@ pub(crate) async fn open(
         .redeem(&ticket, id, address, Instant::now())
         .ok_or(ErrorCode::Unauthenticated)?;
     let access = viewer.access(&state.docs, id).await?;
-    let max = state.live.config().max_message_bytes;
+    let allowed = mode_of(access);
+    let max = state.live.config().frame_limit(allowed);
     let session = Session {
         state,
         document: id,
         viewer,
-        allowed: mode_of(access),
+        allowed,
         address,
     };
     Ok(upgrade

@@ -1,9 +1,10 @@
-//! All rooms of this node, and the connection counts per client network, per account and in all. One
-//! lock guards them: every operation is a few map updates and non-blocking sends.
+//! All rooms of this node, and the connection counts per client network, per account and in all.
+//! One lock guards them: every operation is a few map updates and non-blocking sends.
 use std::{
     collections::HashMap,
     net::IpAddr,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use tokio::sync::mpsc;
@@ -12,7 +13,8 @@ use uuid::Uuid;
 
 use crate::{
     ByeReason, Event, LiveConfig, MemberId, Membership, Mode, Participant, PresenceState,
-    quota_network, room::Room,
+    quota_network,
+    room::{Replay, Room},
 };
 
 /// Why a connection could not join.
@@ -34,6 +36,8 @@ struct State {
     total: usize,
     /// Member ids grow over the whole node, so join order within a room follows them too.
     next_member: u64,
+    /// The highest seq of a room that is gone; a new room numbers above it.
+    retired_seq: u64,
 }
 
 pub struct Hub {
@@ -84,7 +88,11 @@ impl Hub {
         }
         state.next_member += 1;
         let id = MemberId::new(state.next_member);
-        let room = state.rooms.entry(document).or_insert_with(Room::new);
+        let base = state.retired_seq.max(clock_micros());
+        let room = state
+            .rooms
+            .entry(document)
+            .or_insert_with(|| Room::new(base));
         let links_full = matches!(participant, Participant::Link)
             && room.links() >= self.config.max_links_per_document;
         if room.len() >= self.config.max_per_document || links_full {
@@ -135,6 +143,64 @@ impl Hub {
         self.with_room(document, |room, _| room.recheck_started(member));
     }
 
+    pub(crate) fn acquire_lock(&self, document: Uuid, member: MemberId, region: &str, cid: &str) {
+        self.with_room(document, |room, config| {
+            room.acquire_lock(config, member, region, cid, Instant::now());
+        });
+    }
+
+    pub(crate) fn renew_lock(&self, document: Uuid, member: MemberId, region: &str) {
+        self.with_room(document, |room, config| {
+            room.renew_lock(config, member, region, Instant::now());
+        });
+    }
+
+    pub(crate) fn release_lock(&self, document: Uuid, member: MemberId, region: &str) {
+        self.with_room(document, |room, config| {
+            room.release_lock(config, member, region);
+        });
+    }
+
+    pub(crate) fn expire_locks(&self, document: Uuid) {
+        self.with_room(document, |room, config| {
+            room.expire_locks(config, Instant::now());
+        });
+    }
+
+    pub(crate) fn update(
+        &self,
+        document: Uuid,
+        member: MemberId,
+        region: &str,
+        cid: &str,
+        payload: &str,
+    ) {
+        self.with_room(document, |room, config| {
+            room.update(config, member, region, cid, payload, Instant::now());
+        });
+    }
+
+    pub(crate) fn cursor(&self, document: Uuid, member: MemberId, region: &str, range: &str) {
+        self.with_room(document, |room, config| {
+            room.cursor(config, member, region, range);
+        });
+    }
+
+    pub(crate) fn replay(&self, document: Uuid, member: MemberId, since: u64) -> Option<Replay> {
+        self.lock()
+            .rooms
+            .get(&document)
+            .and_then(|room| room.replay(member, since))
+    }
+
+    /// `actor_id` saved `document` as `version`, holding every room update up to `live_seq`
+    /// (`X-Live-Seq`); counts only from the room's leader (see `Room::saved`).
+    pub fn saved(&self, document: Uuid, actor_id: &str, live_seq: u64, version: i32) {
+        self.with_room(document, |room, config| {
+            room.saved(config, actor_id, live_seq, version);
+        });
+    }
+
     /// Whether a save of `document` by `actor_id` may go on (see `Room::may_save`).
     pub fn may_save(&self, document: Uuid, actor_id: &str) -> bool {
         self.lock()
@@ -161,12 +227,12 @@ impl Hub {
         self.lock().rooms.get(&document).map_or(0, Room::len)
     }
 
-    /// Region locks held in the document's room (M4 fills them).
+    /// Region locks in the document's room, lapsed ones not yet swept included.
     pub fn locks_held(&self, document: Uuid) -> usize {
         self.lock()
             .rooms
-            .get_mut(&document)
-            .map_or(0, |room| room.locks_mut().len())
+            .get(&document)
+            .map_or(0, |room| room.locks().len())
     }
 
     fn with_room(&self, document: Uuid, f: impl FnOnce(&mut Room, &LiveConfig)) {
@@ -198,12 +264,23 @@ impl Hub {
                 }
             }
         }
-        if state.rooms.get(&document).is_some_and(Room::is_empty) {
-            state.rooms.remove(&document);
+        if state.rooms.get(&document).is_some_and(Room::is_empty)
+            && let Some(room) = state.rooms.remove(&document)
+        {
+            state.retired_seq = state.retired_seq.max(room.seq());
         }
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// Microseconds since the Unix epoch: a room opened after a restart numbers above anything the
+/// previous process could have issued, so a client's old `since` never matches a new update.
+/// Below 2^53 (exact in JavaScript) until the year 2255.
+fn clock_micros() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
 }

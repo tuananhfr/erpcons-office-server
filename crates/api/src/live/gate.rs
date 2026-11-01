@@ -15,4 +15,8 @@ impl LiveRooms for LiveGate {
     fn may_save(&self, document: Uuid, actor_id: &str) -> bool {
         self.0.may_save(document, actor_id)
     }
+
+    fn saved(&self, document: Uuid, actor_id: &str, live_seq: u64, version: i32) {
+        self.0.saved(document, actor_id, live_seq, version);
+    }
 }

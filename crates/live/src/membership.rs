@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::{ByeReason, Hub, MemberId, Mode, PresenceState};
+use crate::{ByeReason, Hub, MemberId, Mode, PresenceState, room::Replay};
 
 /// A session's place in a room; dropping it leaves the room, however the session ended.
 pub struct Membership {
@@ -42,6 +42,46 @@ impl Membership {
     /// The member may no longer open the document: its session gets `bye` and closes.
     pub fn revoke(&self) {
         self.hub.close(self.document, self.id, ByeReason::Revoked);
+    }
+
+    /// `lock.acquire`: answered `lock.granted`, `lock.denied` or `error` through the queue.
+    pub fn acquire_lock(&self, region: &str, cid: &str) {
+        self.hub.acquire_lock(self.document, self.id, region, cid);
+    }
+
+    pub fn renew_lock(&self, region: &str) {
+        self.hub.renew_lock(self.document, self.id, region);
+    }
+
+    pub fn release_lock(&self, region: &str) {
+        self.hub.release_lock(self.document, self.id, region);
+    }
+
+    /// Drops the room's lapsed locks; sessions call it often, as nothing else keeps time.
+    pub fn expire_locks(&self) {
+        self.hub.expire_locks(self.document);
+    }
+
+    /// `region.update`: answered `ack` (or `error`) through the queue, relayed to the others.
+    pub fn update(&self, region: &str, cid: &str, payload: &str) {
+        self.hub
+            .update(self.document, self.id, region, cid, payload);
+    }
+
+    pub fn cursor(&self, region: &str, range: &str) {
+        self.hub.cursor(self.document, self.id, region, range);
+    }
+
+    /// `region.replay`: the messages to send straight to the socket, in order.
+    pub fn replay(&self, since: u64) -> Vec<Arc<str>> {
+        match self.hub.replay(self.document, self.id, since) {
+            Some(Replay::Updates { mut updates, done }) => {
+                updates.push(done);
+                updates
+            }
+            Some(Replay::Gone(error)) => vec![error],
+            None => Vec::new(),
+        }
     }
 }
 

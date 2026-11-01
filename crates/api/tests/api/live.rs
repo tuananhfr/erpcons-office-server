@@ -154,10 +154,10 @@ async fn presence_states_relay_and_bad_messages_get_errors() {
     for (message, code) in [
         (
             json!({ "type": "lock.acquire", "v": 1, "region": "p1" }),
-            "UNSUPPORTED",
+            "INVALID_MESSAGE",
         ),
         (json!({ "type": "region.changed", "v": 1 }), "UNSUPPORTED"),
-        (json!({ "type": "ack", "v": 1 }), "UNSUPPORTED"),
+        (json!({ "type": "ack", "v": 1 }), "INVALID_MESSAGE"),
         (
             json!({ "type": "presence", "v": 2, "state": "idle" }),
             "UNSUPPORTED_VERSION",

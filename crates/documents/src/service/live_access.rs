@@ -89,6 +89,14 @@ impl Documents {
         }
     }
 
+    /// Tells the room of `id` that the caller's save of `version` holds its updates up to
+    /// `live_seq`.
+    pub(super) fn live_saved(&self, c: &Caller<'_>, id: Uuid, live_seq: u64, version: i32) {
+        if let Some(rooms) = &self.live {
+            rooms.saved(id, c.actor_id(), live_seq, version);
+        }
+    }
+
     /// Refuses a save while several members edit `id` and the caller is not their leader.
     pub(super) fn check_leader(&self, c: &Caller<'_>, id: Uuid) -> Result<(), DocError> {
         match &self.live {

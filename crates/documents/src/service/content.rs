@@ -85,15 +85,19 @@ impl Documents {
     }
 
     /// Saves a new version based on the one whose etag is in `if_match`. 200 means durable; on any
-    /// error no version is recorded.
+    /// error no version is recorded. `live_seq` (`X-Live-Seq`): the bytes hold every update of the
+    /// document's live room up to that seq.
     pub async fn save_content(
         &self,
         c: &Caller<'_>,
         id: Uuid,
         if_match: &[String],
+        live_seq: Option<u64>,
         source: ObjectReader,
     ) -> Result<Document, DocError> {
-        let result = self.save_content_inner(c, id, if_match, source).await;
+        let result = self
+            .save_content_inner(c, id, if_match, live_seq, source)
+            .await;
         self.audit_failure(c, "document.save", Subject::Document(id), &result)
             .await;
         result
@@ -104,6 +108,7 @@ impl Documents {
         c: &Caller<'_>,
         id: Uuid,
         if_match: &[String],
+        live_seq: Option<u64>,
         source: ObjectReader,
     ) -> Result<Document, DocError> {
         // Checked before any byte is stored, so someone who may not write cannot fill the disk.
@@ -117,11 +122,18 @@ impl Documents {
         self.check_room(&owner_id).await?;
         let format = Format::from_mime(&current.row.mime).ok_or(DocError::Unavailable)?;
         let staged = self.stage(format, source).await?;
-        let result = self.record_save(c, id, &owner_id, if_match, &staged).await;
-        if result.is_err() {
-            self.discard(&staged).await;
+        match self.record_save(c, id, &owner_id, if_match, &staged).await {
+            Ok((document, version)) => {
+                if let Some(seq) = live_seq {
+                    self.live_saved(c, id, seq, version);
+                }
+                Ok(document)
+            }
+            Err(e) => {
+                self.discard(&staged).await;
+                Err(e)
+            }
         }
-        result
     }
 
     async fn record_save(
@@ -131,7 +143,7 @@ impl Documents {
         owner_id: &str,
         if_match: &[String],
         staged: &Staged,
-    ) -> Result<Document, DocError> {
+    ) -> Result<(Document, i32), DocError> {
         let mut tx = self.begin().await?;
         self.touch_actor(&mut tx, c, owner_id).await?;
         let object_id = self.claim_object(&mut tx, owner_id, staged).await?;
@@ -158,9 +170,10 @@ impl Documents {
         .await?;
         audit::success(&mut tx, c, "document.save", Subject::Document(id)).await?;
         self.commit(tx).await?;
-        access::load(&self.db, c, id, Action::Read)
+        let document = access::load(&self.db, c, id, Action::Read)
             .await?
-            .document()
+            .document()?;
+        Ok((document, next))
     }
 
     pub async fn open_content(&self, c: &Caller<'_>, id: Uuid) -> Result<Content, DocError> {

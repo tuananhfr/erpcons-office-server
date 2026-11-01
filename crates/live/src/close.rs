@@ -13,6 +13,8 @@ pub enum CloseCode {
     Revoked,
     /// Too many messages, or a message the protocol does not allow at this rate.
     Policy,
+    /// A message larger than its type allows (RFC 6455 1009).
+    TooBig,
     /// The client did not keep up with its events.
     Overloaded,
     /// Room, address or server full.
@@ -24,6 +26,7 @@ impl CloseCode {
         match self {
             Self::Normal => 1000,
             Self::GoingAway => 1001,
+            Self::TooBig => 1009,
             Self::Timeout => 4000,
             Self::Revoked => 4003,
             Self::Policy => 4008,

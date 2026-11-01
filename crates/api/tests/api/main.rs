@@ -13,6 +13,7 @@ mod limits;
 mod links;
 mod live;
 mod live_access;
+mod live_edit;
 mod live_limits;
 mod live_support;
 mod me;

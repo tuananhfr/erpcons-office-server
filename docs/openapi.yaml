@@ -101,7 +101,7 @@ info:
     server per rolling 24 h (configured, default 100; 429 `SIGNUP_DAILY_LIMIT`). Sign-up is open only when the server
     has SMTP and PI's service key (`getSignupStatus`); otherwise 403 `SIGNUP_CLOSED`.
 
-    **Live channel** (plan-next §2.1, M3). Several people with the document open see each other through a WebSocket
+    **Live channel** (plan-next §2.1, M3; co-editing by region, plan-m4, M4). Several people with the document open see each other through a WebSocket
     room per document, held in the server's memory (one node). Browsers cannot send `Authorization` on a WebSocket, so
     a client first trades its PI token (or the public link's token in `X-Link-Token`) for a one-time ticket
     (`createLiveTicket`: random, valid 30 s, spent by the first attempt to use it, bound to the document and the client
@@ -114,25 +114,41 @@ info:
 
     | Server to client | When |
     |---|---|
-    | `hello` | First message: the member's id (`you`), `mode`, `notice`, colour, `seq`, `leader`, everyone present, limits |
+    | `hello` | First message: the member's id (`you`), `mode`, `notice`, colour, `seq`, `saved_seq`, `saved_version`, `leader`, everyone present, limits |
     | `presence` | Someone joined, left, changed mode or state: everyone present (`members`) |
     | `mode` | This member's mode changed (role changed, or an editor slot freed up) |
     | `leader` | The leader changed (`null` when nobody edits) |
+    | `locks` | The lock table changed, and right after `hello` when any region is locked: region → `{holder, colour}` |
+    | `lock.granted` / `lock.denied` | Answer to `lock.acquire` (same `cid`): `region`, `cid`, `holder`, `expires_ms`; `lock.denied` with `cid` `null` when a `lock.renew` failed |
+    | `region.update` | Someone else's update: `seq`, `region`, `author`, `payload` |
+    | `ack` | This member's update was taken: `cid`, `seq` |
+    | `cursor` | Someone else's cursor: `author`, `region`, `range` |
+    | `region.replayed` | End of the answer to `region.replay`: `since`, `seq` |
+    | `save.request` | To the leader only: the room's log overflowed, save now |
+    | `saved` | The leader saved: `saved_seq`, `version` |
     | `bye` | The server ends the session (`reason`), then closes |
-    | `error` | A message was refused (`code`); fatal ones are followed by a close |
+    | `error` | A message was refused (`code`, and `cid` when the message had one); fatal ones are followed by a close |
 
     | Client to server | |
     |---|---|
     | `presence` | `state`: `active` or `idle` |
     | `bye` | Leave; the server closes with 1000 |
+    | `lock.acquire` | `region`, `cid` (the client's id for this message) |
+    | `lock.renew` / `lock.release` | `region` |
+    | `region.update` | `region`, `cid`, `payload` (a string the editor encodes) |
+    | `cursor` | `region`, `range` (a string the editor defines) |
+    | `region.replay` | `since` (a `seq`) |
 
-    `lock.*`, `region.*` and `ack` are reserved for co-editing (M4) and answered with `error` `UNSUPPORTED` for now.
-    Modes: owner and editor `edit`, commenter `comment`, viewer and link holder `view`; a trashed document is `view`
+    Other `lock.*` and `region.*` types are reserved and answered `error` `UNSUPPORTED`; any other unknown type is
+    `INVALID_MESSAGE`. Modes: owner and editor `edit`, commenter `comment`, viewer and link holder `view`; a trashed document is `view`
     for its owner. Link holders are anonymous: they appear without a name, and see nobody's name.
 
-    **Live limits.** A client message or frame over 16 KiB closes the connection (1009). More than 10 frames a second
-    (bursts of 20; pongs and binary frames count too) answers `error` `RATE_LIMITED`, `bye` `rate_limited` and close
-    4008. A document holds at most 50 connections (`error` `ROOM_FULL`, close 4029); at most 10 of them edit, and an
+    **Live limits.** A client message or frame over 16 KiB closes the connection (1009), except `region.update`, which
+    may be up to 1 MiB (the whole message; configurable, `limits.max_region_message_bytes` in `hello`) on a connection
+    that joined with a role allowing edit; any other connection takes 16 KiB frames only. More than 10 frames a second
+    (bursts of 20; pongs and binary frames count too; cursors see below) answers `error` `RATE_LIMITED`, `bye`
+    `rate_limited` and close 4008, and so do more than 4 MiB of `region.update` at once (then 1 MiB a second) and
+    more than 3 `region.replay` at once (then one per 5 s). A document holds at most 50 connections (`error` `ROOM_FULL`, close 4029); at most 10 of them edit, and an
     editor past that joins in `view` mode with `notice` `editor_limit` until a slot frees (then `mode` `edit`); at
     most 30 of them came through the public link (`ROOM_FULL` past that), so people it is shared with always find
     room. One account holds at most 20 connections and one client network (an IPv4 address, or the /56 of an IPv6
@@ -143,8 +159,52 @@ info:
 
     **Leader.** The most recent editor still present leads (`leader`); when it leaves, the most recent remaining
     editor does. While a room has more than one member in `edit` mode, `saveContent` from anyone but the leader's
-    account answers 409 `NOT_LEADER` and writes nothing; with one editor or no room, saves are unchanged. Co-editing
-    itself (regions, sync) comes with M4.
+    account answers 409 `NOT_LEADER` and writes nothing; with one editor or no room, saves are unchanged.
+
+    **Co-editing (M4).** Members in `edit` mode lock the regions they edit and send each region's new content; the
+    server orders the updates, relays them and keeps them until the next save.
+    - *Regions* are ids the editors define (`docs/erp-host.md` of the site), 1 to 256 bytes without control
+      characters. The server knows only `*` (the whole document) and the order locks `pages`, `slides` and
+      `sheet:<id>`. Two members' locks clash when they name the same region, when either is `*`, or when one is
+      `sheet:<id>` and the other `cell:<id>:<anything>`. `pages` and `slides` clash only with themselves: which
+      annotation, field, slide or shape a page or slide operation touches is unknown to the server. One member's own
+      locks never clash (it may hold `*` with its other locks).
+    - *Locks.* `lock.acquire` answers `lock.granted` (lease `expires_ms`, 5000) or `lock.denied` naming the clashing
+      lock that lapses last (`holder`, `expires_ms` until it lapses); acquiring a lock the member holds renews it.
+      A lock lapses unless renewed within its lease (`lock.renew` every 2 s while editing; an accepted
+      `region.update` also renews the locks covering it) and goes within a second after; a renewal of a lapsed lock
+      that nobody took takes it again. Locks go at once when their holder disconnects, leaves `edit` mode (role
+      changed, link turned off) or loses access. A member holds at most 64 (`LOCK_LIMIT`). Every change to the table
+      is announced with `locks`; renewals are not.
+    - *Modes.* Only `edit` may acquire, renew or update (`FORBIDDEN_MODE`, with `cid` when the message had one);
+      `cursor` needs `edit` or `comment`. Releasing is always allowed.
+    - *Updates.* `region.update` needs an unlapsed lock of the sender covering the region: the region itself, `*`,
+      or for `cell:<id>:...` its `sheet:<id>`; otherwise `LOCK_REQUIRED` (with `cid`). The server gives it the next
+      `seq`, answers the sender `ack` and sends `region.update` to everyone else in the room (viewers and link
+      holders included). Answers, others' updates and every other event reach a client through one ordered queue,
+      so a client sees `ack` and `region.update` in `seq` order. A `cid` resent by the same account (after a
+      reconnect too) gets its first `ack` again and is not applied twice; a room remembers the last 4096 `cid`s.
+    - *Seq.* One counter numbers every change of a room (presence, modes, locks, updates), so `region.update` seqs
+      have gaps. Values are opaque, increasing, below 2^53; a room opened again (also after a restart) numbers
+      above everything before it. A client drops a `region.update` whose `seq` is not above the highest it applied.
+    - *Log and replay.* A room keeps the `region.update`s since the last save, up to 8 MiB; past that the oldest go
+      and the leader gets `save.request` (once until the next save; a new leader is asked again). `region.replay`
+      with `since` answers, straight away, every kept update with a higher `seq` then `region.replayed`, or `error`
+      `REPLAY_GONE` with `saved_seq` and `saved_version` when updates after `since` are gone or `since` is not a
+      seq of this room: reload the content (`X-Document-Version` at least `saved_version`) and replay from
+      `saved_seq`. Events queued before the replay may arrive after it with lower seqs; drop them by `seq`. A
+      reconnecting client replays first, then resends its unacknowledged updates with their `cid`s.
+    - *Saves.* `hello` carries `saved_seq` (the seq the stored content holds every update up to: the last
+      leader's save, or the room's starting seq) and `saved_version` (the version that save made; `null` until a
+      leader saved in this room). The leader saves with `saveContent` and `X-Live-Seq` (the last update its bytes
+      hold); after the commit, if the caller's account leads the room and the seq is newer than `saved_seq` and was
+      issued by this room, the room records it, drops the updates up to it and sends everyone `saved`. Otherwise the
+      header changes nothing.
+    - *Cursors* go to everyone else at once and are never logged: at most 20 a second (bursts of 20) without
+      counting towards the message rate; past that they count and are not relayed. A member whose queue is full
+      misses cursors instead of being dropped. `range` is at most 1 KiB; `cid` is 1 to 128 visible ASCII
+      characters.
+    - Version history lists every save; grouping a live session's saves for display is the site's job.
 
     **Logging.** The server never logs titles, folder names, bytes, emails, names, passwords, link or verification
     tokens or access tokens; audit rows hold ids only (a view through the public link has actor kind `link` and no
@@ -163,7 +223,7 @@ tags:
   - name: sharing
     description: Permissions by email, share settings, the public view link and "Shared with me".
   - name: live
-    description: The live room of an open document (presence; co-editing from M4).
+    description: The live room of an open document (presence, region co-editing).
   - name: signup
     description: Self sign-up for a free PI ID account, verified by email.
   - name: ops
@@ -503,13 +563,21 @@ paths:
 
         **Live room.** While the document's live room has more than one member editing, only the leader's account may
         save; anyone else gets 409 `NOT_LEADER` (checked after access and after the repeated-save rule, before any
-        byte is stored). See **Live channel**.
+        byte is stored). The leader sends `X-Live-Seq`; see **Live channel**, *Saves*.
       parameters:
         - name: If-Match
           in: header
           required: true
           description: ETag of the version the edit is based on. Missing answers 428 `PRECONDITION_REQUIRED`.
           schema: { type: string }
+        - name: X-Live-Seq
+          in: header
+          required: false
+          description: >-
+            The `seq` of the last live-room update the bytes hold. Counts only from the room's leader, for a seq of
+            the room newer than its `saved_seq`; otherwise ignored. Anything but one header of decimal digits answers
+            422 `INVALID_REQUEST` before any byte is stored.
+          schema: { type: string, pattern: '^[0-9]+$' }
       requestBody:
         required: true
         content:
@@ -1384,14 +1452,24 @@ components:
           enum: [editor_limit, null]
           description: '`editor_limit`: the role allows editing, but the room already has 10 editors.'
         colour: { type: string }
-        seq: { type: integer, minimum: 0, description: The room's change counter; grows with every change. }
+        seq: { type: integer, minimum: 0, description: 'The room''s change counter; grows with every change (opaque, below 2^53).' }
+        saved_seq:
+          type: integer
+          minimum: 0
+          description: The stored content holds every update up to this seq; replay from here after loading it.
+        saved_version:
+          type: [integer, 'null']
+          description: The version the leader's save at `saved_seq` made; `null` until a leader saved in this room.
         leader: { type: [string, 'null'] }
         members: { type: array, items: { $ref: '#/components/schemas/LiveMember' } }
         limits:
           type: object
-          required: [max_message_bytes, messages_per_second, ping_secs]
+          required: [max_message_bytes, max_region_message_bytes, messages_per_second, ping_secs]
           properties:
-            max_message_bytes: { type: integer }
+            max_message_bytes: { type: integer, description: Largest message but `region.update` (16 KiB). }
+            max_region_message_bytes:
+              type: integer
+              description: Largest `region.update` this connection takes (1 MiB when it joined able to edit, else 16 KiB).
             messages_per_second: { type: number }
             ping_secs: { type: integer }
     LivePresence:
@@ -1439,9 +1517,16 @@ components:
         - ROOM_FULL
         - TOO_MANY_CONNECTIONS
         - SERVER_BUSY
+        - FORBIDDEN_MODE
+        - LOCK_REQUIRED
+        - LOCK_LIMIT
+        - REPLAY_GONE
       description: >-
         `RATE_LIMITED` is followed by `bye` and close 4008; `ROOM_FULL`, `TOO_MANY_CONNECTIONS` and `SERVER_BUSY`
         refuse a join and are followed by close 4029 (1001 while shutting down). The others leave the connection open.
+        `FORBIDDEN_MODE`: the member's mode does not allow the message; `LOCK_REQUIRED`: a `region.update` without a
+        covering lock; `LOCK_LIMIT`: the member holds 64 locks; `REPLAY_GONE`: the room no longer holds every update
+        after `since`.
     LiveError:
       type: object
       required: [type, v, code]
@@ -1449,12 +1534,99 @@ components:
         type: { const: error }
         v: { const: 1 }
         code: { $ref: '#/components/schemas/LiveErrorCode' }
+        cid: { type: string, description: The refused message's `cid`, when it had one. }
+        saved_seq: { type: integer, description: '`REPLAY_GONE` only: replay from here after reloading the content.' }
+        saved_version: { type: [integer, 'null'], description: '`REPLAY_GONE` only: as in `LiveHello`.' }
+    LiveLockView:
+      type: object
+      required: [holder, colour]
+      properties:
+        holder: { type: string, description: The holding member's id. }
+        colour: { type: string, pattern: '^#[0-9a-f]{6}$' }
+    LiveLocks:
+      type: object
+      required: [type, v, seq, locks]
+      properties:
+        type: { const: locks }
+        v: { const: 1 }
+        seq: { type: integer }
+        locks:
+          type: object
+          additionalProperties: { $ref: '#/components/schemas/LiveLockView' }
+          description: The whole table, region id to holder; lapsed locks leave it within a second.
+    LiveLockAnswer:
+      type: object
+      required: [type, v, region, cid, holder, expires_ms]
+      properties:
+        type: { type: string, enum: [lock.granted, lock.denied] }
+        v: { const: 1 }
+        region: { type: string }
+        cid: { type: [string, 'null'], description: 'The `lock.acquire`''s `cid`; `null` for a refused `lock.renew`.' }
+        holder: { type: string, description: 'Granted: this member. Denied: the holder of the clashing lock that lapses last.' }
+        expires_ms: { type: integer, description: 'Milliseconds until that lock lapses unless renewed (granted: the lease, 5000).' }
+    LiveRegionUpdate:
+      type: object
+      required: [type, v, seq, region, author, payload]
+      properties:
+        type: { const: region.update }
+        v: { const: 1 }
+        seq: { type: integer }
+        region: { type: string }
+        author: { type: string, description: The sending member's id. }
+        payload: { type: string }
+    LiveAck:
+      type: object
+      required: [type, v, cid, seq]
+      properties:
+        type: { const: ack }
+        v: { const: 1 }
+        cid: { type: string }
+        seq: { type: integer, description: The seq the update got (the first time, for a resent `cid`). }
+    LiveCursor:
+      type: object
+      required: [type, v, author, region, range]
+      properties:
+        type: { const: cursor }
+        v: { const: 1 }
+        author: { type: string }
+        region: { type: string }
+        range: { type: string }
+    LiveRegionReplayed:
+      type: object
+      required: [type, v, since, seq]
+      properties:
+        type: { const: region.replayed }
+        v: { const: 1 }
+        since: { type: integer }
+        seq: { type: integer, description: 'The room''s seq when the replay was taken: every update up to it was sent.' }
+    LiveSaveRequest:
+      type: object
+      required: [type, v]
+      properties:
+        type: { const: save.request }
+        v: { const: 1 }
+    LiveSaved:
+      type: object
+      required: [type, v, saved_seq, version]
+      properties:
+        type: { const: saved }
+        v: { const: 1 }
+        saved_seq: { type: integer }
+        version: { type: integer, description: The version the save made. }
     LiveServerMessage:
       oneOf:
         - $ref: '#/components/schemas/LiveHello'
         - $ref: '#/components/schemas/LivePresence'
         - $ref: '#/components/schemas/LiveModeChange'
         - $ref: '#/components/schemas/LiveLeader'
+        - $ref: '#/components/schemas/LiveLocks'
+        - $ref: '#/components/schemas/LiveLockAnswer'
+        - $ref: '#/components/schemas/LiveRegionUpdate'
+        - $ref: '#/components/schemas/LiveAck'
+        - $ref: '#/components/schemas/LiveCursor'
+        - $ref: '#/components/schemas/LiveRegionReplayed'
+        - $ref: '#/components/schemas/LiveSaveRequest'
+        - $ref: '#/components/schemas/LiveSaved'
         - $ref: '#/components/schemas/LiveBye'
         - $ref: '#/components/schemas/LiveError'
       discriminator: { propertyName: type }
@@ -1471,7 +1643,51 @@ components:
           properties:
             type: { const: bye }
             v: { const: 1 }
-      description: '`lock.*`, `region.*` and `ack` are reserved (M4); anything else is `INVALID_MESSAGE`.'
+        - type: object
+          required: [type, v, region, cid]
+          properties:
+            type: { const: lock.acquire }
+            v: { const: 1 }
+            region: { $ref: '#/components/schemas/LiveRegionId' }
+            cid: { $ref: '#/components/schemas/LiveCid' }
+        - type: object
+          required: [type, v, region]
+          properties:
+            type: { type: string, enum: [lock.renew, lock.release] }
+            v: { const: 1 }
+            region: { $ref: '#/components/schemas/LiveRegionId' }
+        - type: object
+          required: [type, v, region, cid, payload]
+          properties:
+            type: { const: region.update }
+            v: { const: 1 }
+            region: { $ref: '#/components/schemas/LiveRegionId' }
+            cid: { $ref: '#/components/schemas/LiveCid' }
+            payload: { type: string }
+        - type: object
+          required: [type, v, region, range]
+          properties:
+            type: { const: cursor }
+            v: { const: 1 }
+            region: { $ref: '#/components/schemas/LiveRegionId' }
+            range: { type: string, maxLength: 1024, description: At most 1 KiB (UTF-8). }
+        - type: object
+          required: [type, v, since]
+          properties:
+            type: { const: region.replay }
+            v: { const: 1 }
+            since: { type: integer, minimum: 0 }
+      description: >-
+        Other `lock.*` and `region.*` types are reserved (`UNSUPPORTED`); anything else, or a missing or malformed
+        field, is `INVALID_MESSAGE`.
+    LiveRegionId:
+      type: string
+      minLength: 1
+      description: 1 to 256 bytes (UTF-8), no control characters; `*`, `pages`, `slides` and `sheet:<id>` are special.
+    LiveCid:
+      type: string
+      pattern: '^[!-~]{1,128}$'
+      description: The client's id for the message, unique per account; 1 to 128 visible ASCII characters.
     Error:
       type: object
       required: [code, message_vi, request_id, retryable]
