@@ -8,6 +8,7 @@ mod grants;
 mod invite_mail;
 mod links;
 mod listing;
+mod live_access;
 mod permissions;
 mod purge;
 mod replay;
@@ -27,10 +28,11 @@ pub(crate) use audit::{Subject, system as audit_system};
 pub use content::{Content, CreateDocument};
 pub use documents::DocumentPatch;
 pub use folders::FolderPatch;
+pub use live_access::{LiveAccess, LiveViewer};
 pub use permissions::{AddPermissions, PermissionPatch};
 pub use staging::Staged;
 
-use crate::{DocError, FailPoints, LinkKey, QuotaConfig, intake::ZipLimits};
+use crate::{DocError, FailPoints, LinkKey, LiveRooms, QuotaConfig, intake::ZipLimits};
 
 /// Who asks, and the request id their audit rows carry.
 #[derive(Clone, Copy)]
@@ -56,6 +58,8 @@ pub struct Documents {
     mail: MailPolicy,
     /// Seals link tokens; without it no link can be turned on.
     link_key: Option<LinkKey>,
+    /// Told of access changes and asked before saves; `None` without live rooms.
+    live: Option<Arc<dyn LiveRooms>>,
 }
 
 impl Documents {
@@ -68,6 +72,7 @@ impl Documents {
             fail_points: FailPoints::default(),
             mail: MailPolicy::default(),
             link_key: None,
+            live: None,
         }
     }
 
@@ -80,6 +85,12 @@ impl Documents {
     /// The key link tokens are sealed under (`ERPCONS_LINK_KEY`).
     pub fn with_link_key(mut self, key: Option<LinkKey>) -> Self {
         self.link_key = key;
+        self
+    }
+
+    /// The live rooms to tell of access changes and to ask before saves.
+    pub fn with_live(mut self, rooms: Arc<dyn LiveRooms>) -> Self {
+        self.live = Some(rooms);
         self
     }
 

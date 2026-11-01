@@ -22,11 +22,29 @@ pub(crate) fn generate() -> Result<String, DocError> {
 /// The stored form of a token; `None` for anything that cannot be a token, so it is refused
 /// without a database query.
 pub(crate) fn hash(token: &str) -> Option<String> {
-    let well_formed = token.len() == TOKEN_CHARS
+    LinkHash::of(token).map(|h| h.0)
+}
+
+/// A link token's stored form. No `Debug`: it finds the document.
+#[derive(Clone, PartialEq, Eq)]
+pub struct LinkHash(String);
+
+impl LinkHash {
+    /// `None` for anything that cannot be a token.
+    pub fn of(token: &str) -> Option<Self> {
+        well_formed(token).then(|| Self(hex::encode(Sha256::digest(token.as_bytes()))))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn well_formed(token: &str) -> bool {
+    token.len() == TOKEN_CHARS
         && token
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-    well_formed.then(|| hex::encode(Sha256::digest(token.as_bytes())))
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 #[cfg(test)]

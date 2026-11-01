@@ -10,6 +10,7 @@ pub mod intake;
 pub mod jobs;
 mod link_cipher;
 mod link_token;
+mod live_rooms;
 mod model;
 mod names;
 mod quota;
@@ -23,12 +24,14 @@ pub use error::{BodyTooLarge, DocError};
 pub use fail_points::{FailPoint, FailPoints, Held};
 pub use format::{Format, Kind};
 pub use link_cipher::{InvalidLinkKey, LinkKey};
+pub use link_token::LinkHash;
+pub use live_rooms::LiveRooms;
 pub use model::{Document, Entries, Folder, FolderPath, Page, PageRequest, Version};
 pub use names::{InvalidName, Name};
 pub use quota::{QuotaConfig, QuotaError};
 pub use service::{
     AddPermissions, Caller, Content, CreateDocument, DocumentPatch, Documents, FolderPatch,
-    PermissionPatch, Staged,
+    LiveAccess, LiveViewer, PermissionPatch, Staged,
 };
 pub use sharing_model::{
     AddedPermissions, LinkCreated, LinkState, Permission, Permissions, Person, ShareSettings,

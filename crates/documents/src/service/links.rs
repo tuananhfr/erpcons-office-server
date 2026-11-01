@@ -28,6 +28,9 @@ impl Documents {
         let result = self.enable_link_inner(c, id, expires_at).await;
         self.audit_failure(c, "document.link_enable", Subject::Document(id), &result)
             .await;
+        if result.is_ok() {
+            self.live_changed(Some(id));
+        }
         result
     }
 
@@ -115,6 +118,9 @@ impl Documents {
         let result = self.disable_link_inner(c, id).await;
         self.audit_failure(c, "document.link_disable", Subject::Document(id), &result)
             .await;
+        if result.is_ok() {
+            self.live_changed(Some(id));
+        }
         result
     }
 

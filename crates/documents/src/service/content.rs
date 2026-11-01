@@ -111,6 +111,8 @@ impl Documents {
         if !if_match.contains(&current.row.etag) {
             return self.replay_or_conflict(c, current, if_match, source).await;
         }
+        // After the replay check: a save whose answer was lost still gets it after a hand-over.
+        self.check_leader(c, id)?;
         let owner_id = current.owner_id().to_owned();
         self.check_room(&owner_id).await?;
         let format = Format::from_mime(&current.row.mime).ok_or(DocError::Unavailable)?;

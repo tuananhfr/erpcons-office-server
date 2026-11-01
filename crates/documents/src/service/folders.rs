@@ -182,6 +182,10 @@ impl Documents {
         let result = self.trash_folder_inner(c, id).await;
         self.audit_failure(c, "folder.trash", Subject::Folder(id), &result)
             .await;
+        // Rooms know documents, not folders: every room re-checks.
+        if result.is_ok() {
+            self.live_changed(None);
+        }
         result
     }
 

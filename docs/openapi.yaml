@@ -1264,6 +1264,7 @@ components:
             - INVALID_TOKEN
             - SIGNUP_CLOSED
             - SIGNUP_DAILY_LIMIT
+            - NOT_LEADER
         message_vi: { type: string }
         request_id: { type: string }
         retryable: { type: boolean }

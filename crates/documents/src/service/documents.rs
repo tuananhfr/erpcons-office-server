@@ -83,6 +83,9 @@ impl Documents {
         let result = self.trash_document_inner(c, id).await;
         self.audit_failure(c, "document.trash", Subject::Document(id), &result)
             .await;
+        if result.is_ok() {
+            self.live_changed(Some(id));
+        }
         result
     }
 

@@ -45,6 +45,9 @@ pub enum DocError {
     /// The caller gave access to as many new addresses as it may in a day.
     #[error("too many recipients")]
     TooManyRecipients,
+    /// Several members edit the document live and the caller is not their leader.
+    #[error("not the leader")]
+    NotLeader,
 }
 
 /// Put into an upload's read error by the HTTP layer when the request body passed its limit.

@@ -122,6 +122,9 @@ impl Documents {
         let result = self.add_permissions_inner(c, id, request).await;
         self.audit_failure(c, "document.share", Subject::Document(id), &result)
             .await;
+        if result.is_ok() {
+            self.live_changed(Some(id));
+        }
         result
     }
 
@@ -265,6 +268,9 @@ impl Documents {
             &result,
         )
         .await;
+        if result.is_ok() {
+            self.live_changed(Some(id));
+        }
         result
     }
 
@@ -343,6 +349,9 @@ impl Documents {
         let result = self.remove_permission_inner(c, id, permission_id).await;
         self.audit_failure(c, "document.unshare", Subject::Document(id), &result)
             .await;
+        if result.is_ok() {
+            self.live_changed(Some(id));
+        }
         result
     }
 

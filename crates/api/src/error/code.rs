@@ -26,10 +26,11 @@ pub enum ErrorCode {
     InvalidToken,
     SignupClosed,
     SignupDailyLimit,
+    NotLeader,
 }
 
 impl ErrorCode {
-    pub const ALL: [ErrorCode; 21] = [
+    pub const ALL: [ErrorCode; 22] = [
         Self::Unauthenticated,
         Self::Forbidden,
         Self::NotFound,
@@ -51,6 +52,7 @@ impl ErrorCode {
         Self::InvalidToken,
         Self::SignupClosed,
         Self::SignupDailyLimit,
+        Self::NotLeader,
     ];
 
     pub fn status(self) -> StatusCode {
@@ -58,7 +60,7 @@ impl ErrorCode {
             Self::Unauthenticated => StatusCode::UNAUTHORIZED,
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::NotFound => StatusCode::NOT_FOUND,
-            Self::NameTaken | Self::VersionConflict | Self::VersionIsCurrent => {
+            Self::NameTaken | Self::VersionConflict | Self::VersionIsCurrent | Self::NotLeader => {
                 StatusCode::CONFLICT
             }
             Self::PreconditionRequired => StatusCode::PRECONDITION_REQUIRED,
@@ -105,6 +107,9 @@ impl ErrorCode {
             Self::SignupClosed => "ERPCons Office chưa mở đăng ký tài khoản mới.",
             Self::SignupDailyLimit => {
                 "Hôm nay ERPCons Office đã nhận đủ lượt đăng ký mới. Vui lòng quay lại sau."
+            }
+            Self::NotLeader => {
+                "Tài liệu đang được nhiều người cùng sửa; bản lưu do người dẫn phòng thực hiện."
             }
         }
     }
@@ -159,6 +164,7 @@ mod tests {
         assert_eq!(ErrorCode::InvalidToken.status(), 400);
         assert_eq!(ErrorCode::SignupClosed.status(), 403);
         assert_eq!(ErrorCode::SignupDailyLimit.status(), 429);
+        assert_eq!(ErrorCode::NotLeader.status(), 409);
     }
 
     #[test]
