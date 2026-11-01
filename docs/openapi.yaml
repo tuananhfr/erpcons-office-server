@@ -186,7 +186,8 @@ info:
     that joined with a role allowing edit; any other connection takes 16 KiB frames only. More than 10 frames a second
     (bursts of 20; pongs and binary frames count too; cursors see below) answers `error` `RATE_LIMITED`, `bye`
     `rate_limited` and close 4008, and so do more than 4 MiB of `region.update` at once (then 1 MiB a second) and
-    more than 3 `region.replay` at once (then one per 5 s). A document holds at most 50 connections (`error` `ROOM_FULL`, close 4029); at most 10 of them edit, and an
+    more than 3 `region.replay` at once (then one per 5 s). Presence changes past 3 at once (then one per 2 s) are
+    ignored, and a room shows at most 64 characters of a name. A document holds at most 50 connections (`error` `ROOM_FULL`, close 4029); at most 10 of them edit, and an
     editor past that joins in `view` mode with `notice` `editor_limit` until a slot frees (then `mode` `edit`); at
     most 30 of them came through the public link (`ROOM_FULL` past that), so people it is shared with always find
     room. One account holds at most 20 connections and one client network (an IPv4 address, or the /56 of an IPv6

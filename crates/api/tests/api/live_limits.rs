@@ -406,3 +406,38 @@ async fn an_oversized_binary_frame_closes_like_text() {
         .await;
     assert_eq!(wa.ended().await.code, Some(1009));
 }
+
+#[tokio::test]
+async fn presence_changes_have_a_small_allowance_of_their_own() {
+    let Some(app) = TestApp::spawn().await else {
+        return;
+    };
+    let (a, _, _, doc, _) = shared_document(&app).await;
+    let (mut wa, _) = join(&app, &a, &doc).await;
+    let link = enable_link(&app, &a, &doc).await;
+    let mut holder = join_link(&app, &link, &doc).await;
+    holder.next_of("hello").await;
+    wa.presence_of(2).await;
+    // Each change would send the whole member list to everyone; within the message rate.
+    for n in 0..12 {
+        let state = if n % 2 == 0 { "idle" } else { "active" };
+        holder
+            .send_json(&json!({ "type": "presence", "v": 1, "state": state }))
+            .await;
+    }
+    let heard = wa
+        .listen(Duration::from_millis(500))
+        .await
+        .into_iter()
+        .filter(|m| m["type"] == "presence")
+        .count();
+    assert!(heard <= 3, "{heard} presence messages relayed");
+    assert!(
+        holder
+            .listen(Duration::from_millis(100))
+            .await
+            .iter()
+            .all(|m| m["type"] != "bye"),
+        "the sender stays"
+    );
+}

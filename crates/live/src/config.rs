@@ -29,6 +29,10 @@ pub struct LiveConfig {
     /// the message rate; past that each counts and is not relayed.
     pub cursor_burst: u32,
     pub cursors_per_second: f64,
+    /// Presence changes a connection may make at once, then per second; past that they are
+    /// ignored, since each sends every member the whole member list.
+    pub presence_burst: u32,
+    pub presences_per_second: f64,
     /// `region.replay` requests a connection may send at once, then per second.
     pub replay_burst: u32,
     pub replays_per_second: f64,
@@ -87,6 +91,8 @@ impl Default for LiveConfig {
             region_bytes_per_second: 1024.0 * 1024.0,
             cursor_burst: 20,
             cursors_per_second: 20.0,
+            presence_burst: 3,
+            presences_per_second: 0.5,
             replay_burst: 3,
             replays_per_second: 0.2,
             lock_ttl: Duration::from_secs(5),

@@ -39,12 +39,16 @@ impl Viewer {
         match self {
             Self::Actor(actor) => Participant::User {
                 actor_id: actor.actor_id.clone(),
-                name: actor.display_name.clone(),
+                name: actor.display_name.chars().take(MAX_NAME_CHARS).collect(),
             },
             Self::Link(_) => Participant::Link,
         }
     }
 }
+
+/// A display name as the room shows it: every presence carries every name, so a long one would
+/// multiply what each change sends.
+const MAX_NAME_CHARS: usize = 64;
 
 /// The mode a role allows in the room; a trashed document (its owner's alone) is read-only.
 pub(crate) fn mode_of(access: LiveAccess) -> Mode {
@@ -69,5 +73,19 @@ mod tests {
         assert_eq!(mode(Role::Viewer, false), Mode::View);
         assert_eq!(mode(Role::Link, false), Mode::View);
         assert_eq!(mode(Role::Owner, true), Mode::View);
+    }
+
+    #[test]
+    fn a_room_shows_at_most_64_characters_of_a_name() {
+        let actor = Actor {
+            actor_id: "usr_1".into(),
+            display_name: "Ă".repeat(300),
+            email: office_identity::EmailClaim::Unknown,
+            expires_at: time::OffsetDateTime::UNIX_EPOCH,
+        };
+        let Participant::User { name, .. } = Viewer::Actor(actor).participant() else {
+            panic!("a user");
+        };
+        assert_eq!(name, "Ă".repeat(64));
     }
 }

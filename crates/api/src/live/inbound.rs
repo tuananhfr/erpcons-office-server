@@ -1,6 +1,7 @@
 //! What a client sends: size and rate checks, then the room. Rates are per connection: every frame
 //! counts towards the message rate, except cursors within their own allowance; `region.update`
-//! also spends a byte allowance and `region.replay` a request allowance.
+//! also spends a byte allowance, `region.replay` a request allowance and `presence` one of its own
+//! (past it the change is ignored).
 use std::time::Instant;
 
 use axum::extract::ws::Message;
@@ -16,6 +17,7 @@ pub(super) struct Budgets {
     cursors: MessageRate,
     region_bytes: MessageRate,
     replays: MessageRate,
+    presence: MessageRate,
 }
 
 impl Budgets {
@@ -29,6 +31,7 @@ impl Budgets {
                 now,
             ),
             replays: MessageRate::new(config.replay_burst, config.replays_per_second, now),
+            presence: MessageRate::new(config.presence_burst, config.presences_per_second, now),
         }
     }
 }
@@ -91,7 +94,11 @@ pub(super) fn on_frame(
         Err(code) => return Inbound::Refuse(code),
     };
     match message {
-        ClientMessage::Presence(state) => membership.set_state(state),
+        ClientMessage::Presence(state) => {
+            if budgets.presence.check(now) {
+                membership.set_state(state);
+            }
+        }
         ClientMessage::Bye => return Inbound::End(End::ClientBye),
         ClientMessage::LockAcquire { region, cid } => membership.acquire_lock(&region, &cid),
         ClientMessage::LockRenew { region } => membership.renew_lock(&region),
