@@ -8,9 +8,11 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
     live::shared_document,
-    live_support::{Ws, connect, join, join_link, refused, ticket, wait_members},
+    live_support::{
+        Ws, connect, connect_from, join, join_link, refused, ticket, ticket_path, wait_members,
+    },
     people::enable_link,
-    support::TestApp,
+    support::{TestApp, ok_json},
 };
 
 #[tokio::test]
@@ -223,4 +225,41 @@ async fn pongs_count_towards_the_message_rate() {
     let ended = wa.ended().await;
     assert_eq!(ended.said.as_deref(), Some("rate_limited"));
     assert_eq!(ended.code, Some(4008));
+}
+
+/// A ticket for `doc` with the link's token, asked by a client the proxy saw at `from`.
+async fn link_ticket_from(app: &TestApp, link: &str, doc: &str, from: &str) -> String {
+    let response = app
+        .http
+        .post(app.url(&ticket_path(doc)))
+        .header("x-link-token", link)
+        .header("x-forwarded-for", from)
+        .send()
+        .await
+        .expect("link ticket");
+    let body = ok_json(response, 200).await;
+    body["ticket"].as_str().expect("ticket").to_owned()
+}
+
+#[tokio::test]
+async fn a_link_holder_cannot_push_out_another_ones_tickets() {
+    let Some(app) = TestApp::spawn_with(|s| {
+        s.api.trust_forwarded_for = true;
+        s.api.live = LiveConfig {
+            max_tickets_per_holder: 2,
+            ..LiveConfig::default()
+        };
+    })
+    .await
+    else {
+        return;
+    };
+    let (a, _, _, doc, _) = shared_document(&app).await;
+    let link = enable_link(&app, &a, &doc).await;
+    let mine = link_ticket_from(&app, &link, &doc, "203.0.113.1").await;
+    for _ in 0..3 {
+        link_ticket_from(&app, &link, &doc, "203.0.113.2").await;
+    }
+    let mut ws = connect_from(&app, &doc, &mine, "203.0.113.1").await;
+    ws.next_of("hello").await;
 }

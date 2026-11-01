@@ -73,12 +73,13 @@ pub(crate) async fn ticket(
             Viewer::Link(hash)
         }
     };
+    let address = address(client);
     let ticket = state
         .tickets
         .issue(
             id,
-            address(client),
-            &viewer.quota_key(),
+            address,
+            &viewer.quota_key(address),
             viewer,
             Instant::now(),
         )

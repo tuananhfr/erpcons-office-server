@@ -7,7 +7,10 @@ use serde_json::Value;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
-    tungstenite::{Error as WsError, Message, protocol::CloseFrame},
+    tungstenite::{
+        Error as WsError, Message, client::IntoClientRequest, http::HeaderValue,
+        protocol::CloseFrame,
+    },
 };
 
 use crate::support::{TestApp, ok_json};
@@ -63,6 +66,19 @@ pub async fn connect(app: &TestApp, doc: &str, ticket: &str) -> Ws {
     let (stream, _) = connect_async(live_url(app, doc, ticket))
         .await
         .expect("upgrade");
+    Ws { stream }
+}
+
+/// Opens the room with `ticket` as a client the proxy saw at `from` (`X-Forwarded-For`).
+pub async fn connect_from(app: &TestApp, doc: &str, ticket: &str, from: &str) -> Ws {
+    let mut request = live_url(app, doc, ticket)
+        .into_client_request()
+        .expect("request");
+    request.headers_mut().insert(
+        "x-forwarded-for",
+        HeaderValue::from_str(from).expect("address"),
+    );
+    let (stream, _) = connect_async(request).await.expect("upgrade");
     Ws { stream }
 }
 

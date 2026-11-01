@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use office_documents::{DocError, Documents, LinkHash, LiveAccess, LiveViewer, Role};
 use office_identity::Actor;
 use office_live::{Mode, Participant};
@@ -20,11 +22,16 @@ impl Viewer {
         docs.live_access(id, viewer).await
     }
 
-    /// Names the holder for the ticket quota: the account, or the link (its token's sha256).
-    pub(crate) fn quota_key(&self) -> String {
+    /// Names the holder for the ticket quota: the account, or the link from this client address.
+    /// Everyone holding a public link shares its token; by the link alone, one could push the
+    /// others' tickets out.
+    pub(crate) fn quota_key(&self, address: Option<IpAddr>) -> String {
         match self {
             Self::Actor(actor) => format!("actor:{}", actor.actor_id),
-            Self::Link(hash) => format!("link:{}", hash.as_str()),
+            Self::Link(hash) => match address {
+                Some(ip) => format!("link:{}:{ip}", hash.as_str()),
+                None => format!("link:{}", hash.as_str()),
+            },
         }
     }
 
