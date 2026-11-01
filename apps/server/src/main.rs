@@ -66,11 +66,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
         mail,
         signup,
     );
+    let live = state.live_rooms().clone();
     let app = office_api::router(state).into_make_service_with_connect_info::<SocketAddr>();
     let listener = TcpListener::bind(config.bind).await?;
     info!(address = %config.bind, "listening");
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown::signal())
+        .with_graceful_shutdown(async move {
+            shutdown::signal().await;
+            // Live sessions would otherwise hold the shutdown open for as long as clients stay.
+            live.shutdown();
+        })
         .await?;
     jobs.stop();
     db.close().await;

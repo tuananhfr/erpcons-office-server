@@ -12,7 +12,9 @@ site's own origin (`office.erpcons.vn`, Apache reverse proxy to `127.0.0.1:8710`
   freed when no other version uses them) and the server part of milestone 2
   (sharing by email with roles, pending invitations, share settings, the public view link, "Shared with me",
   "shared with you" mail through an outbox), and self sign-up (`/signup`: verified by mail, then the PI ID account
-  is created through PI's `register`, office-licensing plan part D).
+  is created through PI's `register`, office-licensing plan part D), and the server part of phase 2 milestone 3
+  (`plan-next.md` §2.1): the live room of an open document over a WebSocket opened with a one-time ticket
+  (presence, modes pushed on access changes, the leader whose saves count while several edit, limits).
 - Known limit: `Idempotency-Key` stores the response after the create commits. If the server dies in between, the
   key's claim lapses after 60 s and a repeat creates a second item instead of replaying the first.
 
@@ -21,7 +23,8 @@ site's own origin (`office.erpcons.vn`, Apache reverse proxy to `127.0.0.1:8710`
 | Path | Role |
 |---|---|
 | `apps/server` | Binary: configuration from the environment, start-up (migrations), background jobs, graceful shutdown |
-| `crates/api` | axum router and thin handlers, `Error` body (also for framework rejections), request id, bearer auth (sampled denial audit), rate limits (per address with IPv6 by /64, per actor, token checks, concurrent uploads), body limits (64 KiB JSON), `Idempotency-Key`, tracing |
+| `crates/api` | axum router and thin handlers, `Error` body (also for framework rejections), request id, bearer auth (sampled denial audit), rate limits (per address with IPv6 by /64, per actor, token checks, concurrent uploads), body limits (64 KiB JSON), `Idempotency-Key`, tracing; `live/`: the WebSocket session of a live room (ping, silence, per-connection message rate, access re-check) and the bridge through which the document service reports access changes and asks before saves |
+| `crates/live` | Live rooms, transport-agnostic: one in-memory room per document (members, colours, modes, presence state, change sequence, editor slots, leader, an empty region-lock table for M4), connection counts per address and in all, one-time tickets (sha256 only, 30 s, bound to document and address), the JSON protocol (`protocol.rs`) |
 | `crates/documents` | Document service: `authorize` (deny by default; roles owner, editor, commenter, viewer, link, read from the database on every request), folders and documents, durable save (bytes of a failed request are removed at once), version restore, quota (charged to the document's owner), sharing (permissions by email, pending invitations, share settings, link tokens stored as sha256, "Shared with me"), intake checks (signature, ZIP bomb), purge on request, purge, orphan and audit retention jobs, blank templates in `templates/` |
 | `crates/mail` | "Shared with you" mail: the notice queued in `mail_outbox`, its Vietnamese text, the SMTP transport (lettre, rustls) and the outbox job (retries with backoff for up to 24 h); also the two sign-up mails, whose verification token is issued by the sign-up service when the mail is sent |
 | `crates/signup` | Self sign-up: form rules (shared with the site's `src/lib/signup/rules.ts`), `$2y$` bcrypt hash of the password, one-time verification tokens (sha256 only, 48 h, the latest mail's only), caps (3 mails per address, a server-wide daily cap), the job that sends verified sign-ups to PI's `POST /api/v1/service/accounts/register` with backoff for up to 7 days and then drops the hash, and the expiry of unverified sign-ups after 7 days |
@@ -69,6 +72,8 @@ site's own origin (`office.erpcons.vn`, Apache reverse proxy to `127.0.0.1:8710`
 | `ERPCONS_SIGNUP_DAILY_CAP` | `100` | Sign-ups (verification mails) the whole server accepts per rolling 24 h; past it 429 `SIGNUP_DAILY_LIMIT`. One address also gets at most 3 verification mails a day (fixed, silently) |
 | `ERPCONS_RATE_SIGNUP_BURST` / `ERPCONS_RATE_SIGNUP_PER_SEC` | `5` / `5/3600` | Per client address, sign-ups submitted |
 | `ERPCONS_RATE_SIGNUP_VERIFY_BURST` / `ERPCONS_RATE_SIGNUP_VERIFY_PER_SEC` | `20` / `20/3600` | Per client address, verification tokens tried |
+| `ERPCONS_LIVE_MAX_PER_ADDRESS` | `100` | Live connections from one client address (an IPv6 client by its /64); offices share one address |
+| `ERPCONS_LIVE_MAX_CONNECTIONS` | `5000` | Live connections on the whole server. Per document: 50 connections, 10 editors (fixed) |
 | `RUST_LOG` | `info,sqlx=warn` | Log filter |
 
 ## Tests

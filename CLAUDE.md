@@ -43,6 +43,12 @@ is `docs/openapi.yaml`. The approved plans are `erpcons-workspace/tmp/briefs/off
   `locks::object` (sha256), then document rows, then `locks::recipients` (the sharer's new-address cap), then
   `locks::mail_caps` (the invite mail caps). A mutation writes its
   audit row inside its own transaction.
+- **Live rooms** (`crates/live`, `crates/api/src/live/`): in memory, one node. A PI token never goes in a URL: the
+  WebSocket opens with a one-time ticket (sha256 only, 30 s, bound to document and client address). Membership is
+  decided by `Documents::live_access` (through `authorize`) at the ticket, at the upgrade, after every access change
+  this process commits (`Documents::live_changed`; any new mutation that can change who sees a document must call
+  it) and every 60 s. While a room has more than one editor, `save_content` from a non-leader is 409
+  `NOT_LEADER`. Live logs carry outcomes only: no document id, member, name or ticket.
 - **Intake rules are shared with the site**: change `crates/documents/tests/intake_vectors.json` together with the
   site's `intake-contract.ts`; the vector test fails when they drift.
 - Fail points (`FailPoint`) exist for tests only (`testing` feature); never arm them elsewhere.

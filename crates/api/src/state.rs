@@ -3,11 +3,13 @@ use std::sync::Arc;
 use office_db::PgPool;
 use office_documents::Documents;
 use office_identity::IdentityVerifier;
+use office_live::{Hub, Tickets};
 use office_signup::Signups;
 use office_storage::StorageAdapter;
 
 use crate::{
     ApiConfig, RateConfig,
+    live::{LiveGate, Viewer},
     rate_limit::{ClientKey, ConcurrencyLimiter, KeyedLimiter},
 };
 
@@ -38,6 +40,8 @@ pub struct AppState {
     pub(crate) signups: Arc<Signups>,
     pub(crate) signup_limiter: Arc<KeyedLimiter<ClientKey>>,
     pub(crate) signup_verify_limiter: Arc<KeyedLimiter<ClientKey>>,
+    pub(crate) live: Arc<Hub>,
+    pub(crate) tickets: Arc<Tickets<Viewer>>,
 }
 
 impl AppState {
@@ -47,10 +51,16 @@ impl AppState {
         identity: Arc<dyn IdentityVerifier>,
         config: ApiConfig,
     ) -> Self {
+        let live = Arc::new(Hub::new(config.live.clone()));
+        let tickets = Arc::new(Tickets::new(
+            config.live.ticket_ttl,
+            config.live.max_tickets,
+        ));
         let docs = Arc::new(
             Documents::new(db.clone(), storage.clone(), config.quota)
                 .with_mail(config.mail)
-                .with_link_key(config.link_key.clone()),
+                .with_link_key(config.link_key.clone())
+                .with_live(Arc::new(LiveGate(live.clone()))),
         );
         let signups = Arc::new(Signups::new(db.clone(), config.signup));
         Self {
@@ -67,6 +77,8 @@ impl AppState {
             signups,
             signup_limiter: Arc::new(KeyedLimiter::new(config.signup_rate)),
             signup_verify_limiter: Arc::new(KeyedLimiter::new(config.signup_verify_rate)),
+            live,
+            tickets,
             config: Arc::new(config),
         }
     }
@@ -74,6 +86,11 @@ impl AppState {
     /// The document service behind the routes; the server also runs its jobs.
     pub fn documents(&self) -> &Arc<Documents> {
         &self.docs
+    }
+
+    /// The live rooms; the server ends their sessions when it shuts down.
+    pub fn live_rooms(&self) -> &Arc<Hub> {
+        &self.live
     }
 
     /// The sign-up service; the server's jobs send its mails and hand its accounts to PI.

@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
 
-use office_api::{ApiConfig, RateConfig, TrustedProxies};
+use office_api::{ApiConfig, LiveConfig, RateConfig, TrustedProxies};
 use office_db::PoolConfig;
 use office_documents::{
     LinkKey, QuotaConfig,
@@ -161,6 +161,17 @@ impl ServerConfig {
             // On by default: the server is reachable only through the local Apache proxy (plan §8).
             trust_forwarded_for: vars.parsed("ERPCONS_TRUST_FORWARDED_FOR", true)?,
             trusted_proxies: vars.parsed("ERPCONS_TRUSTED_PROXIES", TrustedProxies::loopback())?,
+            live: LiveConfig {
+                max_per_address: vars.positive(
+                    "ERPCONS_LIVE_MAX_PER_ADDRESS",
+                    defaults.live.max_per_address,
+                )?,
+                max_connections: vars.positive(
+                    "ERPCONS_LIVE_MAX_CONNECTIONS",
+                    defaults.live.max_connections,
+                )?,
+                ..defaults.live.clone()
+            },
         };
 
         let jobs = vars.jobs()?;
@@ -390,6 +401,7 @@ mod tests {
         assert!(c.pi_registrar.is_none());
         assert_eq!(c.api.signup.daily_cap, 100);
         assert_eq!(c.api.signup_rate, ApiConfig::default().signup_rate);
+        assert_eq!(c.api.live, LiveConfig::default());
         assert_eq!(
             c.api.link_key,
             Some(LinkKey::from_base64(DEV_LINK_KEY).expect("dev key"))
@@ -528,8 +540,13 @@ mod tests {
             ("ERPCONS_MAX_CONCURRENT_UPLOADS", "1"),
             ("ERPCONS_RATE_VERIFY_BURST", "7"),
             ("ERPCONS_RATE_VERIFY_PER_SEC", "0.25"),
+            ("ERPCONS_LIVE_MAX_PER_ADDRESS", "7"),
+            ("ERPCONS_LIVE_MAX_CONNECTIONS", "70"),
         ])
         .expect("config");
+        assert_eq!(c.api.live.max_per_address, 7);
+        assert_eq!(c.api.live.max_connections, 70);
+        assert_eq!(c.api.live.max_editors, 10);
         assert_eq!(c.bind.port(), 8710);
         assert!(c.bind.ip().is_unspecified());
         assert_eq!(c.db.max_connections, 4);
@@ -627,6 +644,8 @@ mod tests {
             ("ERPCONS_MAX_CONCURRENT_UPLOADS", "0"),
             ("ERPCONS_RATE_VERIFY_PER_SEC", "0"),
             ("ERPCONS_AUDIT_RETENTION_DAYS", "-1"),
+            ("ERPCONS_LIVE_MAX_PER_ADDRESS", "0"),
+            ("ERPCONS_LIVE_MAX_CONNECTIONS", "x"),
         ] {
             assert_eq!(
                 load(&[bad]).err(),

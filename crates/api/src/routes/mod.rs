@@ -3,6 +3,7 @@ pub(crate) mod documents;
 pub(crate) mod folders;
 pub(crate) mod health;
 pub(crate) mod link;
+pub(crate) mod live;
 pub(crate) mod me;
 pub(crate) mod permissions;
 pub(crate) mod public_links;

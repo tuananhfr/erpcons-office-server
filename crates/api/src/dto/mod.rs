@@ -1,6 +1,8 @@
 //! Response bodies of the contract (`Folder`, `Document`, `Version` and the listings).
+mod live;
 mod sharing;
 
+pub(crate) use live::LiveTicketDto;
 use office_documents::{Document, Entries, Folder, FolderPath, Page, Version};
 use serde::Serialize;
 pub(crate) use sharing::{

@@ -242,4 +242,25 @@ mod tests {
             json!({ "type": "leader", "v": 1, "seq": 4, "leader": null })
         );
     }
+
+    const OPENAPI: &str = include_str!("../../../docs/openapi.yaml");
+
+    #[test]
+    fn error_codes_match_the_openapi_contract() {
+        let schema = OPENAPI
+            .split("\n    LiveErrorCode:\n")
+            .nth(1)
+            .expect("LiveErrorCode schema in openapi.yaml");
+        let list = schema.split("enum:\n").nth(1).expect("code enum");
+        let documented: Vec<&str> = list
+            .lines()
+            .map_while(|l| l.trim().strip_prefix("- "))
+            .collect();
+        let ours: Vec<String> = LiveErrorCode::ALL
+            .iter()
+            .map(|c| serde_json::to_value(c).expect("serialize"))
+            .map(|v| v.as_str().expect("string").to_owned())
+            .collect();
+        assert_eq!(ours, documented);
+    }
 }

@@ -10,6 +10,7 @@ mod dto;
 mod error;
 mod extract;
 mod idempotency;
+mod live;
 mod rate_limit;
 mod request_id;
 mod requests;
@@ -30,6 +31,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 pub use auth::Authenticated;
 pub use config::{ApiConfig, BODY_OVERHEAD_BYTES, JSON_BODY_BYTES, RateConfig};
 pub use error::{ApiError, ErrorCode};
+pub use office_live::LiveConfig;
 pub use office_mail::MailPolicy;
 pub use office_signup::SignupPolicy;
 pub use request_id::RequestId;
@@ -107,6 +109,11 @@ pub fn router(state: AppState) -> Router {
             "/documents/{document_id}/link",
             put(routes::link::enable).delete(routes::link::disable),
         )
+        .route(
+            "/documents/{document_id}/live-ticket",
+            post(routes::live::ticket),
+        )
+        .route("/documents/{document_id}/live", get(routes::live::open))
         .route("/shared", get(routes::shared::list))
         .route("/shared/{document_id}/seen", post(routes::shared::seen))
         .route("/link", get(routes::public_links::open))

@@ -10,6 +10,7 @@ publish.workspace = true
 office-db.workspace = true
 office-documents.workspace = true
 office-identity.workspace = true
+office-live.workspace = true
 office-mail.workspace = true
 office-signup.workspace = true
 office-storage.workspace = true
@@ -28,6 +29,7 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+futures-util = { workspace = true, features = ["sink"] }
 office-db = { workspace = true, features = ["testing"] }
 office-documents = { workspace = true, features = ["testing"] }
 office-identity = { workspace = true, features = ["testing"] }
@@ -35,6 +37,7 @@ reqwest = { workspace = true, features = ["json", "stream"] }
 sqlx.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
+tokio-tungstenite.workspace = true
 tracing-subscriber.workspace = true
 
 [lints]

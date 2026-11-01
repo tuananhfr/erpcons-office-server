@@ -25,7 +25,7 @@ office-storage = { path = "crates/storage" }
 # from ring's random source, so no getrandom feature.
 aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc"] }
 async-trait = "0.1.92"
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["ws"] }
 base64 = "0.23.1"
 # Password hashes handed to PI for sign-ups: `$2y$` bcrypt, which PHP's password_verify reads on every build (MIT).
 # Salts come from ring like every other secret of the server.
@@ -48,6 +48,8 @@ tempfile = "3.27.0"
 thiserror = "2.0.21"
 time = { version = "0.3.55", features = ["serde", "formatting", "parsing"] }
 tokio = "1.54.1"
+# WebSocket client of the live channel's tests; the server side is axum's `ws` (same tungstenite).
+tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["connect"] }
 tokio-util = { version = "0.7.20", features = ["io"] }
 tower = "0.5.3"
 tower-http = { version = "0.7.1", features = ["trace", "set-header"] }

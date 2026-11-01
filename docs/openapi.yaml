@@ -4,10 +4,12 @@ info:
   version: 0.2.0-draft
   description: |
     Phases 0–2 of the online tier (ERPCONS OFFICE ONLINE V3.0 §05, §07, §08): documents, folders, immutable versions
-    and their restore, trash, quota, and sharing (people by email, a public view link, "Shared with me"). Served on the
+    and their restore, trash, quota, sharing (people by email, a public view link, "Shared with me"), and the live room
+    of an open document (presence, phase 2 M3). Served on the
     site's origin under `/api/v1`, so browsers need no CORS.
 
-    **Authentication.** Every operation except `/health`, the two `/link` and the three `/signup` operations takes the user's PI ID access token as
+    **Authentication.** Every operation except `/health`, the two `/link`, the three `/signup` operations and `openLive`
+    (a ticket, see **Live channel**) takes the user's PI ID access token as
     `Authorization: Bearer`. The server verifies it locally and resolves it to an actor (`actor_id` = PI `sub`): an
     EdDSA JWT (`typ: JWT`) signed by a key in PI's JWKS, with the configured issuer, an unexpired `exp` (and `nbf`/`iat`
     not in the future), an `aud` naming `pi-platform` and an `azp` among Office's clients (by default
@@ -99,6 +101,48 @@ info:
     server per rolling 24 h (configured, default 100; 429 `SIGNUP_DAILY_LIMIT`). Sign-up is open only when the server
     has SMTP and PI's service key (`getSignupStatus`); otherwise 403 `SIGNUP_CLOSED`.
 
+    **Live channel** (plan-next §2.1, M3). Several people with the document open see each other through a WebSocket
+    room per document, held in the server's memory (one node). Browsers cannot send `Authorization` on a WebSocket, so
+    a client first trades its PI token (or the public link's token in `X-Link-Token`) for a one-time ticket
+    (`createLiveTicket`: random, valid 30 s, spent by the first attempt to use it, bound to the document and the client
+    address), then opens `GET /documents/{document_id}/live?ticket=...` (`openLive`). A PI token never travels in a
+    URL. Access is decided like any request (role read from the database, 404 unless visible) when the ticket is
+    issued, again at the upgrade, at once after every change made in this process that may affect it (permission
+    added, changed or removed, link turned on or off, document or its folder trashed), and every 60 s for changes made
+    elsewhere (expiries). A member who may no longer open the document gets `bye` (`revoked`) and close code 4003; a
+    member whose role changes gets `mode`. Messages are JSON with `type` and `v` (1); see the `Live*` schemas.
+
+    | Server to client | When |
+    |---|---|
+    | `hello` | First message: the member's id (`you`), `mode`, `notice`, colour, `seq`, `leader`, everyone present, limits |
+    | `presence` | Someone joined, left, changed mode or state: everyone present (`members`) |
+    | `mode` | This member's mode changed (role changed, or an editor slot freed up) |
+    | `leader` | The leader changed (`null` when nobody edits) |
+    | `bye` | The server ends the session (`reason`), then closes |
+    | `error` | A message was refused (`code`); fatal ones are followed by a close |
+
+    | Client to server | |
+    |---|---|
+    | `presence` | `state`: `active` or `idle` |
+    | `bye` | Leave; the server closes with 1000 |
+
+    `lock.*`, `region.*` and `ack` are reserved for co-editing (M4) and answered with `error` `UNSUPPORTED` for now.
+    Modes: owner and editor `edit`, commenter `comment`, viewer and link holder `view`; a trashed document is `view`
+    for its owner. Link holders are anonymous: they appear without a name, and see nobody's name.
+
+    **Live limits.** A client message or frame over 16 KiB closes the connection (1009). More than 10 messages a
+    second (bursts of 20) answers `error` `RATE_LIMITED`, `bye` `rate_limited` and close 4008. A document holds at
+    most 50 connections (`error` `ROOM_FULL`, close 4029); at most 10 of them edit, and an editor past that joins in
+    `view` mode with `notice` `editor_limit` until a slot frees (then `mode` `edit`). One client address holds at most
+    100 connections (`TOO_MANY_CONNECTIONS`), the server 5000 (`SERVER_BUSY`); both are configurable. The server pings
+    every 20 s; a connection silent for 30 s has left (`bye` `timeout`, close 4000). A client that does not keep up
+    with its messages is dropped (close 4013). At shutdown: `bye` `shutdown`, close 1001.
+
+    **Leader.** The most recent editor still present leads (`leader`); when it leaves, the most recent remaining
+    editor does. While a room has more than one member in `edit` mode, `saveContent` from anyone but the leader's
+    account answers 409 `NOT_LEADER` and writes nothing; with one editor or no room, saves are unchanged. Co-editing
+    itself (regions, sync) comes with M4.
+
     **Logging.** The server never logs titles, folder names, bytes, emails, names, passwords, link or verification
     tokens or access tokens; audit rows hold ids only (a view through the public link has actor kind `link` and no
     token).
@@ -115,6 +159,8 @@ tags:
     description: Documents, their versions and the trash.
   - name: sharing
     description: Permissions by email, share settings, the public view link and "Shared with me".
+  - name: live
+    description: The live room of an open document (presence; co-editing from M4).
   - name: signup
     description: Self sign-up for a free PI ID account, verified by email.
   - name: ops
@@ -451,6 +497,10 @@ paths:
         bytes have the same sha256, the save already happened: the answer is 200 with the current version and ETag,
         no version is added and no quota is used. Anything else whose `If-Match` is not current (other bytes, a
         version made by someone else, an older base) answers 409.
+
+        **Live room.** While the document's live room has more than one member editing, only the leader's account may
+        save; anyone else gets 409 `NOT_LEADER` (checked after access and after the repeated-save rule, before any
+        byte is stored). See **Live channel**.
       parameters:
         - name: If-Match
           in: header
@@ -473,7 +523,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '409': { $ref: '#/components/responses/VersionConflict' }
+        '409': { $ref: '#/components/responses/SaveConflict' }
         '413': { $ref: '#/components/responses/TooLarge' }
         '422': { $ref: '#/components/responses/Unprocessable' }
         '428': { $ref: '#/components/responses/PreconditionRequired' }
@@ -585,6 +635,61 @@ paths:
         '422': { $ref: '#/components/responses/Unprocessable' }
         '428': { $ref: '#/components/responses/PreconditionRequired' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /documents/{document_id}/live-ticket:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    post:
+      operationId: createLiveTicket
+      tags: [live]
+      security: [{ piBearer: [] }, {}]
+      summary: A one-time ticket that opens the document's live room
+      description: |
+        With `Authorization: Bearer` (any role), or without signing in with `X-Link-Token` (the public link's token;
+        rate limited per address like `openLink`, audited as a link view). When `X-Link-Token` is sent, it alone
+        decides. The ticket is valid for `expires_in` seconds, for this document, from this client address, once.
+      parameters:
+        - name: X-Link-Token
+          in: header
+          required: false
+          description: The public link's token, instead of a PI token. Never logged.
+          schema: { type: string }
+      responses:
+        '200':
+          description: The ticket.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LiveTicket' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /documents/{document_id}/live:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    get:
+      operationId: openLive
+      tags: [live]
+      security: []
+      summary: The document's live room (WebSocket upgrade)
+      description: |
+        A WebSocket handshake (RFC 6455) with a ticket from `createLiveTicket`. A missing, malformed, unknown, spent or
+        expired ticket, or one issued for another document or from another address, answers 401 `UNAUTHENTICATED`
+        (the ticket is spent either way); access lost since the ticket was issued answers 404. A request that is not a
+        WebSocket handshake answers 422 and leaves the ticket unspent. After the upgrade the server sends `hello`
+        (`LiveHello`); refusals for capacity arrive as `error` then a close frame (see **Live channel**).
+      parameters:
+        - name: ticket
+          in: query
+          required: true
+          description: The ticket; single-use and short-lived, so a URL that leaks (an access log) opens nothing.
+          schema: { type: string, pattern: '^[A-Za-z0-9_-]{43}$' }
+      responses:
+        '101':
+          description: Switching to the WebSocket protocol; messages are `LiveServerMessage` and `LiveClientMessage`.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
   /documents/{document_id}/permissions:
     parameters:
       - $ref: '#/components/parameters/DocumentId'
@@ -1236,6 +1341,129 @@ components:
         sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
         author_name: { type: string, description: Display name snapshot taken when the version was saved (§06). }
         created_at: { type: string, format: date-time }
+    LiveTicket:
+      type: object
+      required: [ticket, expires_in]
+      properties:
+        ticket: { type: string, pattern: '^[A-Za-z0-9_-]{43}$', description: 'For `openLive`; never logged.' }
+        expires_in: { type: integer, description: Seconds it stays valid (30). }
+    LiveMode:
+      type: string
+      enum: [edit, comment, view]
+      description: What the shell passes to the editor's `setMode`.
+    LiveMember:
+      type: object
+      required: [id, kind, colour, mode, state]
+      properties:
+        id: { type: string, description: 'Opaque, unique in the room (`m<n>`); never an account id.' }
+        kind: { type: string, enum: [user, link] }
+        name:
+          type: string
+          description: PI display name. Absent for link holders, for a user whose name PI did not give, and in everything a link holder receives.
+        colour: { type: string, pattern: '^#[0-9a-f]{6}$' }
+        mode: { $ref: '#/components/schemas/LiveMode' }
+        state: { type: string, enum: [active, idle] }
+    LiveHello:
+      type: object
+      required: [type, v, you, mode, notice, colour, seq, leader, members, limits]
+      properties:
+        type: { const: hello }
+        v: { const: 1 }
+        you: { type: string, description: This member's id. }
+        mode: { $ref: '#/components/schemas/LiveMode' }
+        notice:
+          type: [string, 'null']
+          enum: [editor_limit, null]
+          description: '`editor_limit`: the role allows editing, but the room already has 10 editors.'
+        colour: { type: string }
+        seq: { type: integer, minimum: 0, description: The room's change counter; grows with every change. }
+        leader: { type: [string, 'null'] }
+        members: { type: array, items: { $ref: '#/components/schemas/LiveMember' } }
+        limits:
+          type: object
+          required: [max_message_bytes, messages_per_second, ping_secs]
+          properties:
+            max_message_bytes: { type: integer }
+            messages_per_second: { type: number }
+            ping_secs: { type: integer }
+    LivePresence:
+      type: object
+      required: [type, v, seq, members]
+      properties:
+        type: { const: presence }
+        v: { const: 1 }
+        seq: { type: integer }
+        members: { type: array, items: { $ref: '#/components/schemas/LiveMember' } }
+    LiveModeChange:
+      type: object
+      required: [type, v, seq, mode, notice]
+      properties:
+        type: { const: mode }
+        v: { const: 1 }
+        seq: { type: integer }
+        mode: { $ref: '#/components/schemas/LiveMode' }
+        notice: { type: [string, 'null'], enum: [editor_limit, null] }
+    LiveLeader:
+      type: object
+      required: [type, v, seq, leader]
+      properties:
+        type: { const: leader }
+        v: { const: 1 }
+        seq: { type: integer }
+        leader: { type: [string, 'null'], description: 'The leading member''s id; `null` when nobody edits.' }
+    LiveBye:
+      type: object
+      required: [type, v, reason]
+      properties:
+        type: { const: bye }
+        v: { const: 1 }
+        reason:
+          type: string
+          enum: [revoked, timeout, shutdown, rate_limited, overloaded]
+          description: 'Close codes: revoked 4003, timeout 4000, shutdown 1001, rate_limited 4008, overloaded 4013.'
+    LiveErrorCode:
+      type: string
+      enum:
+        - INVALID_MESSAGE
+        - UNSUPPORTED_VERSION
+        - UNSUPPORTED
+        - RATE_LIMITED
+        - ROOM_FULL
+        - TOO_MANY_CONNECTIONS
+        - SERVER_BUSY
+      description: >-
+        `RATE_LIMITED` is followed by `bye` and close 4008; `ROOM_FULL`, `TOO_MANY_CONNECTIONS` and `SERVER_BUSY`
+        refuse a join and are followed by close 4029 (1001 while shutting down). The others leave the connection open.
+    LiveError:
+      type: object
+      required: [type, v, code]
+      properties:
+        type: { const: error }
+        v: { const: 1 }
+        code: { $ref: '#/components/schemas/LiveErrorCode' }
+    LiveServerMessage:
+      oneOf:
+        - $ref: '#/components/schemas/LiveHello'
+        - $ref: '#/components/schemas/LivePresence'
+        - $ref: '#/components/schemas/LiveModeChange'
+        - $ref: '#/components/schemas/LiveLeader'
+        - $ref: '#/components/schemas/LiveBye'
+        - $ref: '#/components/schemas/LiveError'
+      discriminator: { propertyName: type }
+    LiveClientMessage:
+      oneOf:
+        - type: object
+          required: [type, v, state]
+          properties:
+            type: { const: presence }
+            v: { const: 1 }
+            state: { type: string, enum: [active, idle] }
+        - type: object
+          required: [type, v]
+          properties:
+            type: { const: bye }
+            v: { const: 1 }
+      description: '`lock.*`, `region.*` and `ack` are reserved (M4); anything else is `INVALID_MESSAGE`.'
     Error:
       type: object
       required: [code, message_vi, request_id, retryable]
@@ -1299,6 +1527,16 @@ components:
                 required: [latest_version]
                 properties:
                   latest_version: { type: integer, minimum: 1 }
+    SaveConflict:
+      description: '`VERSION_CONFLICT` (with `latest_version`): the current version is not the one in `If-Match`; or `NOT_LEADER`: several members edit the document live and the caller is not their leader.'
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Error'
+              - type: object
+                properties:
+                  latest_version: { type: integer, minimum: 1, description: '`VERSION_CONFLICT` only.' }
     Conflict:
       description: '`NAME_TAKEN`: a folder with that name already exists in the same parent.'
       content:

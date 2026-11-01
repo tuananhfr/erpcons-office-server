@@ -13,10 +13,10 @@ use axum::{
 use super::respond;
 use crate::{ApiError, AppState, ErrorCode, RequestId, dto::DocumentDto, rate_limit::ClientKey};
 
-const TOKEN_HEADER: &str = "x-link-token";
+pub(crate) const TOKEN_HEADER: &str = "x-link-token";
 
 /// A missing or unreadable header answers as an unknown token does.
-fn token(headers: &HeaderMap) -> Result<&str, ApiError> {
+pub(crate) fn token(headers: &HeaderMap) -> Result<&str, ApiError> {
     headers
         .get(TOKEN_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -24,8 +24,8 @@ fn token(headers: &HeaderMap) -> Result<&str, ApiError> {
 }
 
 /// Guessing a 256-bit token is hopeless; the limit is against a flood of downloads per address.
-fn check_rate(state: &AppState, client: Option<Extension<ClientKey>>) -> Result<(), ApiError> {
-    let key = client.map_or(ClientKey(None), |Extension(k)| k);
+pub(crate) fn check_rate(state: &AppState, client: Option<ClientKey>) -> Result<(), ApiError> {
+    let key = client.unwrap_or(ClientKey(None));
     state
         .link_limiter
         .check(key, Instant::now())
@@ -45,7 +45,7 @@ pub(crate) async fn open(
     client: Option<Extension<ClientKey>>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    check_rate(&state, client)?;
+    check_rate(&state, client.map(|Extension(k)| k))?;
     let doc = state.docs.open_link(token(&headers)?, rid.as_str()).await?;
     Ok(no_referrer(Json(DocumentDto::from(&doc)).into_response()))
 }
@@ -56,7 +56,7 @@ pub(crate) async fn content(
     client: Option<Extension<ClientKey>>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    check_rate(&state, client)?;
+    check_rate(&state, client.map(|Extension(k)| k))?;
     let content = state
         .docs
         .open_link_content(token(&headers)?, rid.as_str())

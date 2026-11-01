@@ -1,4 +1,5 @@
 use office_documents::{LinkKey, QuotaConfig};
+use office_live::LiveConfig;
 use office_mail::MailPolicy;
 use office_signup::SignupPolicy;
 
@@ -40,6 +41,8 @@ pub struct ApiConfig {
     /// writes, but only on connections from `trusted_proxies`.
     pub trust_forwarded_for: bool,
     pub trusted_proxies: TrustedProxies,
+    /// Limits and timings of the live channel.
+    pub live: LiveConfig,
 }
 
 /// Room above the per-file limit for multipart framing and the other form fields.
@@ -89,6 +92,7 @@ impl Default for ApiConfig {
             max_concurrent_uploads: 3,
             trust_forwarded_for: false,
             trusted_proxies: TrustedProxies::loopback(),
+            live: LiveConfig::default(),
         }
     }
 }

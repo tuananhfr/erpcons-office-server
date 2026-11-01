@@ -110,6 +110,11 @@ impl TestApp {
         self.state.documents()
     }
 
+    /// The live rooms, to wait for joins and leaves.
+    pub fn live(&self) -> &Arc<office_live::Hub> {
+        self.state.live_rooms()
+    }
+
     /// The sign-up service, for issuing the token a verification mail would carry.
     pub fn signups(&self) -> &Arc<Signups> {
         self.state.signups()
