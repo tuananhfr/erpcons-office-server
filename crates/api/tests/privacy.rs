@@ -1,6 +1,12 @@
 //! Logs and audit rows never contain a token, a display name, a folder name, a document title or
 //! file bytes. A test binary of its own: its subscriber is process-wide, which a thread-local one
 //! cannot reliably be while other tests run.
+#[path = "api/live_support.rs"]
+#[allow(
+    dead_code,
+    reason = "shared with the api test binary; this one uses only part of it"
+)]
+mod live_support;
 #[path = "api/support.rs"]
 #[allow(
     dead_code,
@@ -91,6 +97,14 @@ async fn tokens_and_names_stay_out_of_logs_and_audit() {
     secrets.extend(shared.iter().map(String::as_str));
     secrets.extend(signed_up.iter().map(String::as_str));
     let text = logs.text();
+    assert!(
+        text.contains("live session ended"),
+        "live sessions are logged: {text}"
+    );
+    assert!(
+        !text.contains(&doc_id),
+        "the document id leaked into the logs"
+    );
     assert!(text.contains(&ok_id), "request spans are logged: {text}");
     assert!(
         text.contains("sqlx::query"),
@@ -104,7 +118,7 @@ async fn tokens_and_names_stay_out_of_logs_and_audit() {
         .fetch_all(app.pool())
         .await
         .expect("audit rows");
-    assert_eq!(rows.len(), 14, "{rows:?}");
+    assert_eq!(rows.len(), 15, "{rows:?}");
     for row in &rows {
         for secret in secrets.iter().copied() {
             assert!(!row.contains(secret), "{secret:?} leaked into audit: {row}");
@@ -129,6 +143,7 @@ async fn tokens_and_names_stay_out_of_logs_and_audit() {
             ("folder.create".into(), "success".into()),
             ("folder.update".into(), "success".into()),
             ("link.content".into(), "success".into()),
+            ("link.live".into(), "success".into()),
             ("link.open".into(), "success".into()),
             ("me.read".into(), "success".into()),
             ("me.read".into(), "success".into()),
@@ -219,6 +234,7 @@ async fn share_and_link(app: &TestApp, token: &str, doc_id: &str) -> Vec<String>
     let link = link["token"].as_str().expect("token").to_owned();
     assert_eq!(app.open_link(&link).await.status(), 200);
     assert_eq!(app.open_link_content(&link).await.status(), 200);
+    let live = live_room(app, token, doc_id, &link).await;
     let off = app
         .request(
             Method::DELETE,
@@ -236,7 +252,30 @@ async fn share_and_link(app: &TestApp, token: &str, doc_id: &str) -> Vec<String>
         recipient,
         link,
         "Canary lời nhắn 6a1f".to_owned(),
+        live[0].clone(),
+        live[1].clone(),
     ]
+}
+
+/// A live session of the owner and of a link holder; returns both tickets.
+async fn live_room(app: &TestApp, token: &str, doc_id: &str, link: &str) -> [String; 2] {
+    let owner_ticket = live_support::ticket(app, token, doc_id).await;
+    let mut owner = live_support::connect(app, doc_id, &owner_ticket).await;
+    owner.next_of("hello").await;
+    let issued = live_support::link_ticket(app, link, doc_id).await;
+    let issued: Value = issued.json().await.expect("ticket body");
+    let link_ticket = issued["ticket"].as_str().expect("ticket").to_owned();
+    let mut viewer = live_support::connect(app, doc_id, &link_ticket).await;
+    viewer.next_of("hello").await;
+    viewer
+        .send_json(&json!({ "type": "presence", "v": 1, "state": "idle" }))
+        .await;
+    owner.presence_of(2).await;
+    viewer.bye().await;
+    owner.presence_of(1).await;
+    app.live().shutdown();
+    owner.ended().await;
+    [owner_ticket, link_ticket]
 }
 
 /// Signs up and verifies; returns the name, address, password and verification token.
