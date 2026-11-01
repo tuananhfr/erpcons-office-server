@@ -316,3 +316,25 @@ async fn the_periodic_check_catches_changes_made_elsewhere() {
     assert_eq!(wc.next_of("mode").await["mode"], "comment");
     wa.presence_of(2).await;
 }
+
+#[tokio::test]
+async fn trashing_a_folder_rechecks_only_its_own_documents() {
+    let Some(app) = TestApp::spawn().await else {
+        return;
+    };
+    let (a, b, _, doc, _) = shared_document(&app).await;
+    let (mut wb, _) = join(&app, &b, &doc).await;
+    let folder = app.create_folder(&a, None, "Khác").await;
+    let folder = format!("/api/v1/folders/{}", folder["id"].as_str().expect("id"));
+    // Unnoticed until the periodic check: another document's change must not bring it forward.
+    sqlx::query("UPDATE document_acl SET revoked_at = now() WHERE email_norm = $1")
+        .bind(B_EMAIL)
+        .execute(app.pool())
+        .await
+        .expect("revoke");
+    app.trash(&a, &folder).await;
+    app.trash(&a, &folder).await;
+    let heard = wb.listen(Duration::from_millis(500)).await;
+    assert!(heard.iter().all(|m| m["type"] != "bye"), "{heard:?}");
+    wait_members(&app, &doc, 1).await;
+}

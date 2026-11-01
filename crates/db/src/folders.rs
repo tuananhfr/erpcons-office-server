@@ -145,12 +145,13 @@ pub async fn is_ancestor_or_self(
 }
 
 /// Trashes an active folder, its active subfolders and the active documents in them, all with
-/// the same `trashed_at`: that shared instant is what a restore brings back together.
+/// the same `trashed_at`: that shared instant is what a restore brings back together. Returns the
+/// documents it trashed.
 pub async fn trash_tree(
     conn: &mut PgConnection,
     owner_id: &str,
     id: Uuid,
-) -> Result<bool, sqlx::Error> {
+) -> Result<Vec<Uuid>, sqlx::Error> {
     let trashed: Vec<Uuid> = sqlx::query_scalar(
         "WITH RECURSIVE tree AS (
              SELECT id FROM folders WHERE id = $1 AND owner_id = $2 AND state = 'ACTIVE'
@@ -166,17 +167,17 @@ pub async fn trash_tree(
     .fetch_all(&mut *conn)
     .await?;
     if trashed.is_empty() {
-        return Ok(false);
+        return Ok(Vec::new());
     }
-    sqlx::query(
+    sqlx::query_scalar(
         "UPDATE documents SET state = 'TRASHED', trashed_at = now(), updated_at = now()
-         WHERE owner_id = $1 AND state = 'ACTIVE' AND folder_id = ANY($2)",
+         WHERE owner_id = $1 AND state = 'ACTIVE' AND folder_id = ANY($2)
+         RETURNING id",
     )
     .bind(owner_id)
     .bind(&trashed)
-    .execute(conn)
-    .await?;
-    Ok(true)
+    .fetch_all(conn)
+    .await
 }
 
 /// Restores a trashed folder into `parent_id`, with the subfolders and documents trashed together

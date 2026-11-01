@@ -83,24 +83,26 @@ impl Documents {
         let result = self.trash_document_inner(c, id).await;
         self.audit_failure(c, "document.trash", Subject::Document(id), &result)
             .await;
-        if result.is_ok() {
-            self.live_changed(Some(id));
+        if let Ok(true) = result {
+            self.live_changed([id]);
         }
-        result
+        result.map(|_| ())
     }
 
-    async fn trash_document_inner(&self, c: &Caller<'_>, id: Uuid) -> Result<(), DocError> {
+    /// True when this call moved the document to the trash.
+    async fn trash_document_inner(&self, c: &Caller<'_>, id: Uuid) -> Result<bool, DocError> {
         let mut tx = self.begin().await?;
         let accessed = access::load(&mut *tx, c, id, Action::Trash).await?;
         if accessed.row.state == ItemState::Trashed {
-            return Ok(());
+            return Ok(false);
         }
         if !documents::trash(&mut *tx, id).await.map_err(DocError::db)? {
             // Trashed or purged by someone else meanwhile.
-            return Ok(());
+            return Ok(false);
         }
         audit::success(&mut tx, c, "document.trash", Subject::Document(id)).await?;
-        tx.commit().await.map_err(DocError::db)
+        tx.commit().await.map_err(DocError::db)?;
+        Ok(true)
     }
 
     /// Restores the document, into the root when its folder is gone or trashed. Restoring an

@@ -78,6 +78,8 @@ pub(crate) struct Member {
     /// Holds one of the room's editor slots.
     pub slot: bool,
     pub state: PresenceState,
+    /// An `Event::Recheck` is queued and not yet taken up.
+    pub recheck_queued: bool,
     pub address: Option<IpAddr>,
     pub sender: mpsc::Sender<Event>,
 }

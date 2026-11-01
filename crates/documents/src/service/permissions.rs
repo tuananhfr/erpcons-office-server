@@ -123,7 +123,7 @@ impl Documents {
         self.audit_failure(c, "document.share", Subject::Document(id), &result)
             .await;
         if result.is_ok() {
-            self.live_changed(Some(id));
+            self.live_changed([id]);
         }
         result
     }
@@ -269,7 +269,7 @@ impl Documents {
         )
         .await;
         if result.is_ok() {
-            self.live_changed(Some(id));
+            self.live_changed([id]);
         }
         result
     }
@@ -350,7 +350,7 @@ impl Documents {
         self.audit_failure(c, "document.unshare", Subject::Document(id), &result)
             .await;
         if result.is_ok() {
-            self.live_changed(Some(id));
+            self.live_changed([id]);
         }
         result
     }

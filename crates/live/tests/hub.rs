@@ -210,12 +210,14 @@ fn presence_state_and_rechecks_reach_the_members() {
     b.membership.set_state(PresenceState::Idle);
     assert_eq!(a.next_of("presence")["members"][1]["state"], "idle");
     b.drain();
-    hub.access_changed(Some(doc));
+    hub.access_changed(doc);
     assert!(matches!(a.events.try_recv(), Ok(Event::Recheck)));
     assert!(matches!(b.events.try_recv(), Ok(Event::Recheck)));
-    hub.access_changed(None);
+    a.membership.recheck_started();
+    hub.access_changed(doc);
     assert!(matches!(a.events.try_recv(), Ok(Event::Recheck)));
-    hub.access_changed(Some(Uuid::new_v4()));
+    assert!(b.idle(), "b has not taken up its recheck yet");
+    hub.access_changed(Uuid::new_v4());
     assert!(a.idle());
 }
 
@@ -286,4 +288,18 @@ fn region_locks_start_empty() {
     let doc = Uuid::new_v4();
     let _a = join(&hub, doc, user("a"), Mode::Edit);
     assert_eq!(hub.locks_held(doc), 0);
+}
+
+#[test]
+fn a_burst_of_access_changes_queues_one_recheck_per_member() {
+    let hub = hub(|c| c.outbox = 4);
+    let doc = Uuid::new_v4();
+    let mut a = join(&hub, doc, user("a"), Mode::Edit);
+    a.drain();
+    for _ in 0..100 {
+        hub.access_changed(doc);
+    }
+    assert_eq!(hub.members_of(doc), 1, "nobody is dropped for it");
+    assert!(matches!(a.events.try_recv(), Ok(Event::Recheck)));
+    assert!(a.idle());
 }

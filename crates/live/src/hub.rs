@@ -105,22 +105,14 @@ impl Hub {
         self.with_room(document, |room, config| room.close(config, member, reason));
     }
 
-    /// Access to `document` (every document when `None`) may have changed in this process: each
-    /// member's session reads its role again at once.
-    pub fn access_changed(&self, document: Option<Uuid>) {
-        let mut state = self.lock();
-        let documents: Vec<Uuid> = match document {
-            Some(id) => vec![id],
-            None => state.rooms.keys().copied().collect(),
-        };
-        for id in documents {
-            let Some(room) = state.rooms.get_mut(&id) else {
-                continue;
-            };
-            room.recheck(&self.config);
-            let removed = room.take_removed();
-            Self::release(&mut state, id, removed);
-        }
+    /// Access to `document` may have changed in this process: each member's session reads its
+    /// role again at once.
+    pub fn access_changed(&self, document: Uuid) {
+        self.with_room(document, Room::recheck);
+    }
+
+    pub(crate) fn recheck_started(&self, document: Uuid, member: MemberId) {
+        self.with_room(document, |room, _| room.recheck_started(member));
     }
 
     /// Whether a save of `document` by `actor_id` may go on (see `Room::may_save`).

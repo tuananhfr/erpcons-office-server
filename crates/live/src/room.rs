@@ -69,6 +69,7 @@ impl Room {
                 allowed,
                 slot,
                 state: PresenceState::Active,
+                recheck_queued: false,
                 address,
                 sender,
             },
@@ -130,13 +131,27 @@ impl Room {
         self.drop_unreachable(config);
     }
 
-    /// Asks every session to read its member's role again.
+    /// Asks every session to read its member's role again. A burst of changes queues one recheck
+    /// per member, so it cannot fill a queue and drop the member.
     pub fn recheck(&mut self, config: &LiveConfig) {
-        let ids: Vec<MemberId> = self.members.keys().copied().collect();
+        let mut ids = Vec::new();
+        for (id, member) in &mut self.members {
+            if !member.recheck_queued {
+                member.recheck_queued = true;
+                ids.push(*id);
+            }
+        }
         for id in ids {
             self.deliver(id, Event::Recheck);
         }
         self.drop_unreachable(config);
+    }
+
+    /// The member's session took up its queued recheck; a change from now on queues another.
+    pub fn recheck_started(&mut self, id: MemberId) {
+        if let Some(member) = self.members.get_mut(&id) {
+            member.recheck_queued = false;
+        }
     }
 
     /// Saves count only from the leader while more than one member edits; one editor (or none)

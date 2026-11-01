@@ -29,6 +29,12 @@ impl Membership {
         self.hub.set_allowed(self.document, self.id, allowed);
     }
 
+    /// Call on taking up an `Event::Recheck`, before reading the role: a change committed while it
+    /// is read queues the next one.
+    pub fn recheck_started(&self) {
+        self.hub.recheck_started(self.document, self.id);
+    }
+
     pub fn set_state(&self, state: PresenceState) {
         self.hub.set_state(self.document, self.id, state);
     }

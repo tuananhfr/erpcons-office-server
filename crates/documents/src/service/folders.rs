@@ -182,14 +182,11 @@ impl Documents {
         let result = self.trash_folder_inner(c, id).await;
         self.audit_failure(c, "folder.trash", Subject::Folder(id), &result)
             .await;
-        // Rooms know documents, not folders: every room re-checks.
-        if result.is_ok() {
-            self.live_changed(None);
-        }
-        result
+        result.map(|trashed| self.live_changed(trashed))
     }
 
-    async fn trash_folder_inner(&self, c: &Caller<'_>, id: Uuid) -> Result<(), DocError> {
+    /// The documents this call moved to the trash.
+    async fn trash_folder_inner(&self, c: &Caller<'_>, id: Uuid) -> Result<Vec<Uuid>, DocError> {
         let mut tx = self.begin().await?;
         locks::tree(&mut tx, c.actor_id())
             .await
@@ -197,14 +194,15 @@ impl Documents {
         let row = owned_folder(&mut *tx, c, id, Action::Trash).await?;
         match row.state {
             ItemState::Active => {}
-            ItemState::Trashed => return Ok(()),
+            ItemState::Trashed => return Ok(Vec::new()),
             _ => return Err(DocError::NotFound),
         }
-        folders::trash_tree(&mut tx, c.actor_id(), id)
+        let trashed = folders::trash_tree(&mut tx, c.actor_id(), id)
             .await
             .map_err(DocError::db)?;
         audit::success(&mut tx, c, "folder.trash", Subject::Folder(id)).await?;
-        tx.commit().await.map_err(DocError::db)
+        tx.commit().await.map_err(DocError::db)?;
+        Ok(trashed)
     }
 
     /// Restores the folder and what was trashed with it, into the root when its former parent is

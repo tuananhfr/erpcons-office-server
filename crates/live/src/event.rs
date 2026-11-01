@@ -6,6 +6,7 @@ pub enum Event {
     Send(String),
     /// Send `bye` with this reason, then close.
     Close(ByeReason),
-    /// Access to the document may have changed: read the member's role again now.
+    /// Access to the document may have changed: read the member's role again now. At most one is
+    /// queued per member until the session calls [`crate::Membership::recheck_started`].
     Recheck,
 }

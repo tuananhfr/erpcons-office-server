@@ -8,7 +8,7 @@ use uuid::Uuid;
 pub(crate) struct LiveGate(pub Arc<Hub>);
 
 impl LiveRooms for LiveGate {
-    fn access_changed(&self, document: Option<Uuid>) {
+    fn access_changed(&self, document: Uuid) {
         self.0.access_changed(document);
     }
 

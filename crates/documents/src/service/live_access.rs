@@ -66,10 +66,13 @@ impl Documents {
         Ok(access)
     }
 
-    /// Tells the live rooms that access to `document` (any, when `None`) changed.
-    pub(super) fn live_changed(&self, document: Option<Uuid>) {
+    /// Tells the live rooms that access to these documents changed. Called only after a commit
+    /// that changed something: every call costs each member of the room a database read.
+    pub(super) fn live_changed(&self, documents: impl IntoIterator<Item = Uuid>) {
         if let Some(rooms) = &self.live {
-            rooms.access_changed(document);
+            documents
+                .into_iter()
+                .for_each(|id| rooms.access_changed(id));
         }
     }
 

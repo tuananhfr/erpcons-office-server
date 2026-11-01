@@ -97,6 +97,7 @@ pub(crate) async fn run(mut socket: WebSocket, session: Session) {
                 }
                 Some(Event::Close(reason)) => break End::Bye(reason),
                 Some(Event::Recheck) => {
+                    membership.recheck_started();
                     if let Some(end) = recheck_access(&session, &membership).await {
                         break end;
                     }
