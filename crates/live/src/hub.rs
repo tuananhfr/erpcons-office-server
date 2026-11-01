@@ -32,6 +32,8 @@ struct State {
     per_address: HashMap<Option<IpAddr>, usize>,
     per_actor: HashMap<String, usize>,
     total: usize,
+    /// Member ids grow over the whole node, so join order within a room follows them too.
+    next_member: u64,
 }
 
 pub struct Hub {
@@ -78,6 +80,8 @@ impl Hub {
         {
             return Err(JoinRefused::ActorFull);
         }
+        state.next_member += 1;
+        let id = MemberId::new(state.next_member);
         let room = state.rooms.entry(document).or_insert_with(Room::new);
         let links_full = matches!(participant, Participant::Link)
             && room.links() >= self.config.max_links_per_document;
@@ -88,7 +92,7 @@ impl Hub {
             return Err(JoinRefused::RoomFull);
         }
         let (sender, receiver) = mpsc::channel(self.config.outbox.max(1));
-        let id = room.add(&self.config, participant, allowed, address, sender);
+        room.add(&self.config, id, participant, allowed, address, sender);
         let removed = room.take_removed();
         state.total += 1;
         *state.per_address.entry(address).or_insert(0) += 1;

@@ -14,7 +14,6 @@ use crate::{
 
 pub(crate) struct Room {
     members: BTreeMap<MemberId, Member>,
-    next_id: u64,
     seq: u64,
     leader: Option<MemberId>,
     locks: LockTable,
@@ -27,7 +26,6 @@ impl Room {
     pub fn new() -> Self {
         Self {
             members: BTreeMap::new(),
-            next_id: 1,
             seq: 0,
             leader: None,
             locks: LockTable::default(),
@@ -57,16 +55,16 @@ impl Room {
         std::mem::take(&mut self.removed)
     }
 
+    /// Adds a member under `id`, which must be greater than every id the room held.
     pub fn add(
         &mut self,
         config: &LiveConfig,
+        id: MemberId,
         participant: Participant,
         allowed: Mode,
         address: Option<IpAddr>,
         sender: mpsc::Sender<Event>,
-    ) -> MemberId {
-        let id = MemberId::new(self.next_id);
-        self.next_id += 1;
+    ) {
         let colour = palette::pick(self.members.values().map(|m| m.colour));
         let slot = allowed == Mode::Edit && self.slots_used() < config.max_editors;
         self.members.insert(
@@ -90,7 +88,6 @@ impl Room {
             self.broadcast_leader(Some(id));
         }
         self.drop_unreachable(config);
-        id
     }
 
     pub fn remove(&mut self, config: &LiveConfig, id: MemberId) {

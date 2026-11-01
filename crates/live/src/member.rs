@@ -5,7 +5,8 @@ use tokio::sync::mpsc;
 
 use crate::{Event, Mode, Notice};
 
-/// A member's id in its room, never reused there and never an actor id.
+/// A member's id, never reused on this node (a room emptied and opened again included) and never
+/// an actor id: a session that outlived its place must not act on whoever came after it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MemberId(u64);
 

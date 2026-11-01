@@ -338,3 +338,19 @@ fn a_burst_of_access_changes_queues_one_recheck_per_member() {
     assert!(matches!(a.events.try_recv(), Ok(Event::Recheck)));
     assert!(a.idle());
 }
+
+#[test]
+fn a_member_dropped_from_a_room_never_touches_a_later_one() {
+    let hub = hub(|c| c.outbox = 1);
+    let doc = Uuid::new_v4();
+    let a = join(&hub, doc, user("a"), Mode::Edit);
+    let b = join(&hub, doc, user("b"), Mode::View);
+    // Both queues were full: both were dropped and the room is gone.
+    assert_eq!(hub.members_of(doc), 0);
+    let _c = join(&hub, doc, Participant::Link, Mode::View);
+    a.membership.set_allowed(Mode::Edit);
+    drop(a);
+    drop(b);
+    assert_eq!(hub.members_of(doc), 1);
+    assert_eq!(hub.connections(), 1);
+}
