@@ -1,5 +1,8 @@
 //! `/api/v1` against a real Postgres (`TEST_DATABASE_URL`) and an in-process PI stand-in.
 mod can_share;
+mod comment_live;
+mod comment_mail;
+mod comments;
 mod content;
 mod documents;
 mod errors;

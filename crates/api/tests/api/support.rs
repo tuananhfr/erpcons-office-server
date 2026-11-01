@@ -66,6 +66,7 @@ impl TestApp {
                 verify_rate: UNLIMITED,
                 signup_rate: UNLIMITED,
                 signup_verify_rate: UNLIMITED,
+                comment_rate: UNLIMITED,
                 max_concurrent_uploads: 1000,
                 link_key: Some(office_documents::LinkKey::from_bytes([42; 32])),
                 ..ApiConfig::default()
