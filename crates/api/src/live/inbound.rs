@@ -64,7 +64,7 @@ pub(super) fn on_frame(
             };
         }
         Message::Text(text) => (protocol::parse(text.as_str()), text.len()),
-        Message::Binary(_) => (Err(LiveErrorCode::InvalidMessage), 0),
+        Message::Binary(bytes) => (Err(LiveErrorCode::InvalidMessage), bytes.len()),
     };
     let big = bytes > config.max_message_bytes;
     let message = match parsed {

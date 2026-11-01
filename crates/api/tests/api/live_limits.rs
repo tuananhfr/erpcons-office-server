@@ -9,7 +9,8 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::{
     live::shared_document,
     live_support::{
-        Ws, connect, connect_from, join, join_link, refused, ticket, ticket_path, wait_members,
+        Ws, connect, connect_from, join, join_link, refused, refused_from, ticket, ticket_path,
+        wait_members,
     },
     people::{enable_link, upload},
     support::{TestApp, ok_json},
@@ -285,19 +286,15 @@ async fn ticket_request_from(
         .expect("ticket")
 }
 
-async fn expect_refused_ticket(response: reqwest::Response) {
-    assert_eq!(response.status(), 503);
-    assert_eq!(
-        response
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok()),
-        Some("1")
-    );
+async fn ticket_of(response: reqwest::Response) -> String {
+    ok_json(response, 200).await["ticket"]
+        .as_str()
+        .expect("ticket")
+        .to_owned()
 }
 
 #[tokio::test]
-async fn a_full_ipv6_56_refuses_new_tickets_without_pushing_out_others() {
+async fn filling_an_ipv6_56_pushes_out_only_ones_own_tickets() {
     let Some(app) = TestApp::spawn_with(|s| {
         s.api.trust_forwarded_for = true;
         s.api.live = LiveConfig {
@@ -316,29 +313,22 @@ async fn a_full_ipv6_56_refuses_new_tickets_without_pushing_out_others() {
         "2001:db8:0:1ff::1",
         "2001:db8:0:1a0::1",
     ];
-    let response = ticket_request_from(&app, &b, false, &doc, from[0]).await;
-    let b_ticket = ok_json(response, 200).await["ticket"]
-        .as_str()
-        .expect("ticket")
-        .to_owned();
-    let response = ticket_request_from(&app, &a, false, &doc, from[1]).await;
-    let a_ticket = ok_json(response, 200).await["ticket"]
-        .as_str()
-        .expect("ticket")
-        .to_owned();
-    expect_refused_ticket(ticket_request_from(&app, &a, false, &doc, from[2]).await).await;
+    let b_ticket = ticket_of(ticket_request_from(&app, &b, false, &doc, from[0]).await).await;
+    let a_first = ticket_of(ticket_request_from(&app, &a, false, &doc, from[1]).await).await;
+    let a_second = ticket_of(ticket_request_from(&app, &a, false, &doc, from[2]).await).await;
+    assert_eq!(
+        refused_from(&app, &doc, &a_first, from[1]).await,
+        401,
+        "A, filling the /56, pushed out its own ticket"
+    );
     let mut wb = connect_from(&app, &doc, &b_ticket, from[0]).await;
     wb.next_of("hello").await;
-    let mut wa = connect_from(&app, &doc, &a_ticket, from[1]).await;
+    let mut wa = connect_from(&app, &doc, &a_second, from[2]).await;
     wa.next_of("hello").await;
 
     // Connections count by the /56 too.
-    let response = ticket_request_from(&app, &a, false, &doc, from[2]).await;
-    let third = ok_json(response, 200).await["ticket"]
-        .as_str()
-        .expect("ticket")
-        .to_owned();
-    let ended = connect_from(&app, &doc, &third, from[2])
+    let third = ticket_of(ticket_request_from(&app, &a, false, &doc, from[1]).await).await;
+    let ended = connect_from(&app, &doc, &third, from[1])
         .await
         .ended()
         .await;
@@ -346,7 +336,7 @@ async fn a_full_ipv6_56_refuses_new_tickets_without_pushing_out_others() {
 }
 
 #[tokio::test]
-async fn link_tickets_of_one_owner_are_capped_without_pushing_out_others() {
+async fn filling_an_owners_link_cap_pushes_out_only_ones_own_tickets() {
     let Some(app) = TestApp::spawn_with(|s| {
         s.api.trust_forwarded_for = true;
         s.api.live = LiveConfig {
@@ -362,16 +352,28 @@ async fn link_tickets_of_one_owner_are_capped_without_pushing_out_others() {
     let (other, _) = upload(&app, &a, "second").await;
     let link = enable_link(&app, &a, &doc).await;
     let other_link = enable_link(&app, &a, &other).await;
-    let mine = link_ticket_from(&app, &link, &doc, "203.0.113.1").await;
+    let first = link_ticket_from(&app, &link, &doc, "203.0.113.1").await;
     let theirs = link_ticket_from(&app, &other_link, &other, "203.0.113.2").await;
-    expect_refused_ticket(ticket_request_from(&app, &link, true, &doc, "203.0.113.1").await).await;
-    expect_refused_ticket(ticket_request_from(&app, &link, true, &doc, "203.0.113.3").await).await;
+    let second = link_ticket_from(&app, &link, &doc, "203.0.113.1").await;
+    assert_eq!(refused_from(&app, &doc, &first, "203.0.113.1").await, 401);
     let mut ws = connect_from(&app, &other, &theirs, "203.0.113.2").await;
     ws.next_of("hello").await;
-    let mut ws = connect_from(&app, &doc, &mine, "203.0.113.1").await;
+    let mut ws = connect_from(&app, &doc, &second, "203.0.113.1").await;
     ws.next_of("hello").await;
-    // Redeemed tickets make room; an account's ticket is not a link ticket.
-    link_ticket_from(&app, &link, &doc, "203.0.113.3").await;
+    // An account's ticket is not a link ticket.
     let (_wa, hello) = join(&app, &a, &doc).await;
     assert_eq!(hello["mode"], "edit");
+}
+
+#[tokio::test]
+async fn an_oversized_binary_frame_closes_like_text() {
+    let Some(app) = TestApp::spawn().await else {
+        return;
+    };
+    let (a, _, _, doc, _) = shared_document(&app).await;
+    // An editor's connection takes frames up to the region limit; this one is past 16 KiB.
+    let (mut wa, _) = join(&app, &a, &doc).await;
+    wa.send_frame(Message::Binary(vec![0; 20 * 1024].into()))
+        .await;
+    assert_eq!(wa.ended().await.code, Some(1009));
 }

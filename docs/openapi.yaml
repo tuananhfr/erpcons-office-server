@@ -718,11 +718,13 @@ paths:
         With `Authorization: Bearer` (any role), or without signing in with `X-Link-Token` (the public link's token;
         rate limited per address like `openLink`, audited as a link view). When `X-Link-Token` is sent, it alone
         decides. The ticket is valid for `expires_in` seconds, for this document, from this client address, once.
-        One account (a link: from one client network) holds at most 20 unspent tickets; a new one past that replaces
-        its own oldest. Caps shared with others never push anyone's ticket out: past 100 unspent tickets from one
-        client network (an IPv4 address, or the /56 of an IPv6 address), 300 through the public links of one owner's
-        documents together, or 10 000 on the whole server, a new ticket is refused with 503 `UNAVAILABLE` and
-        `Retry-After: 1` (tickets are spent or lapse within 30 s).
+        Unspent tickets are capped per holder (an account, or a link from one client network: 20), per holder and
+        client network (a quarter of the network's cap: 25), per client network (an IPv4 address, or the /56 of an
+        IPv6 address: 100), per owner's public links and client network (an eighth of the owner's cap: 37), per
+        owner's public links (300; accounts' tickets never count) and on the whole server (10 000). A new ticket past
+        a cap makes room by evicting, within that cap, the oldest ticket of the holder with the most tickets there;
+        on a tie the requester's own if it is among them, else the tied holder's oldest. Whoever fills a cap so
+        pushes out its own tickets first. A request whose client address is unknown answers 503.
       parameters:
         - name: X-Link-Token
           in: header

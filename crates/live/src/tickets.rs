@@ -1,9 +1,10 @@
 //! One-time tickets that open a live connection. Browsers cannot put an `Authorization` header on
 //! a WebSocket, so the client trades its token for a ticket and puts only that in the URL; the
 //! ticket is short-lived, single-use, bound to one document and the client address, and held only
-//! as its sha256. One holder (an account, or a link from one client network) keeps only its most
-//! recent tickets; past the caps of a client network, of one owner's links, or of the store, a new
-//! ticket is refused. Nobody's ticket is ever pushed out by someone else's.
+//! as its sha256. Caps bound what one holder (an account, or a link from one client network), one
+//! client network, one owner's public links and the whole store hold; a new ticket past a cap makes
+//! room by evicting the oldest ticket of the heaviest holder in that cap, the requester itself on a
+//! tie. Whoever fills a cap so pushes out its own tickets first, never a light user's.
 use std::{
     collections::HashMap,
     net::IpAddr,
@@ -24,9 +25,8 @@ const TICKET_CHARS: usize = 43;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TicketError {
-    /// As many tickets are outstanding as the server, the client network or the owner's links
-    /// may hold; try again shortly.
-    Full,
+    /// The client address is unknown; a shared unknown bucket would let anyone crowd it.
+    NoAddress,
     /// The system random source failed.
     Random,
 }
@@ -34,6 +34,8 @@ pub enum TicketError {
 struct Entry<T> {
     document: Uuid,
     address: Option<IpAddr>,
+    /// The client network the caps count (`quota_network`).
+    network: Option<IpAddr>,
     holder_key: String,
     /// The document owner, for tickets issued through a public link.
     owner: Option<String>,
@@ -76,8 +78,9 @@ impl<T> Tickets<T> {
         self.ttl
     }
 
-    /// A ticket for `holder`; `holder_key` names it (an account, a link) for the quota, and
-    /// `link_owner` is the document owner when it comes through a public link.
+    /// A ticket for `holder`; `holder_key` names it (an account, or a link from one client
+    /// network) for the caps, and `link_owner` is the document owner when it comes through a public
+    /// link.
     pub fn issue(
         &self,
         document: Uuid,
@@ -87,28 +90,41 @@ impl<T> Tickets<T> {
         holder: T,
         now: Instant,
     ) -> Result<String, TicketError> {
+        if address.is_none() {
+            return Err(TicketError::NoAddress);
+        }
         let mut bytes = [0u8; TICKET_BYTES];
         SystemRandom::new()
             .fill(&mut bytes)
             .map_err(|_| TicketError::Random)?;
         let ticket = URL_SAFE_NO_PAD.encode(bytes);
+        let network = quota_network(address);
         let mut store = self.store.lock().unwrap_or_else(PoisonError::into_inner);
         // Full passes: the store holds at most `max` entries, and issuing is rate limited.
         store.entries.retain(|_, e| e.expires > now);
-        // Only the holder's own tickets make room: a cap shared with others refuses instead, or one
-        // person on a shared network or link could push out everyone else's tickets.
-        evict_oldest(&mut store.entries, self.per_holder, |e| {
+        let entries = &mut store.entries;
+        make_room(entries, holder_key, self.per_holder, |e| {
             e.holder_key == holder_key
         });
-        let network = quota_network(address);
-        let network_full =
-            count(&store.entries, |e| quota_network(e.address) == network) >= self.per_address;
-        let owner_full = link_owner.is_some_and(|owner| {
-            count(&store.entries, |e| e.owner.as_deref() == Some(owner)) >= self.per_owner
+        // One holder takes at most a quarter of its network's share, one network an eighth of an
+        // owner's links: filling a shared cap takes several of them.
+        make_room(entries, holder_key, (self.per_address / 4).max(1), |e| {
+            e.holder_key == holder_key && e.network == network
         });
-        if network_full || owner_full || store.entries.len() >= self.max {
-            return Err(TicketError::Full);
+        if let Some(owner) = link_owner {
+            make_room(entries, holder_key, (self.per_owner / 8).max(1), |e| {
+                e.owner.as_deref() == Some(owner) && e.network == network
+            });
         }
+        make_room(entries, holder_key, self.per_address, |e| {
+            e.network == network
+        });
+        if let Some(owner) = link_owner {
+            make_room(entries, holder_key, self.per_owner, |e| {
+                e.owner.as_deref() == Some(owner)
+            });
+        }
+        make_room(entries, holder_key, self.max, |_| true);
         let issued = store.next;
         store.next += 1;
         store.entries.insert(
@@ -116,6 +132,7 @@ impl<T> Tickets<T> {
             Entry {
                 document,
                 address,
+                network,
                 holder_key: holder_key.to_owned(),
                 owner: link_owner.map(str::to_owned),
                 holder,
@@ -161,27 +178,42 @@ impl<T> Tickets<T> {
     }
 }
 
-fn count<T>(entries: &HashMap<[u8; 32], Entry<T>>, same: impl Fn(&Entry<T>) -> bool) -> usize {
-    entries.values().filter(|e| same(e)).count()
-}
-
-/// Removes the oldest entries matching `same` until one more fits under `limit` (at least 1).
-fn evict_oldest<T>(
+/// Evicts until one more ticket fits under `limit` among the entries `in_cap`: each time the
+/// oldest ticket of the holder with the most there, `requester` on a tie, else the tied holder
+/// with the oldest ticket.
+fn make_room<T>(
     entries: &mut HashMap<[u8; 32], Entry<T>>,
+    requester: &str,
     limit: usize,
-    same: impl Fn(&Entry<T>) -> bool,
+    in_cap: impl Fn(&Entry<T>) -> bool,
 ) {
-    let mut matching: Vec<(u64, [u8; 32])> = entries
-        .iter()
-        .filter(|(_, e)| same(e))
-        .map(|(key, e)| (e.issued, *key))
-        .collect();
-    if matching.len() < limit {
-        return;
-    }
-    matching.sort_unstable();
-    for (_, key) in &matching[..=matching.len() - limit] {
-        entries.remove(key);
+    loop {
+        // Per holder: tickets in the cap, and its oldest (issue number, key).
+        let mut holders: HashMap<&str, (usize, (u64, [u8; 32]))> = HashMap::new();
+        let mut total = 0;
+        for (key, e) in entries.iter().filter(|(_, e)| in_cap(e)) {
+            total += 1;
+            let slot = holders
+                .entry(e.holder_key.as_str())
+                .or_insert((0, (e.issued, *key)));
+            slot.0 += 1;
+            slot.1 = slot.1.min((e.issued, *key));
+        }
+        if total < limit.max(1) {
+            return;
+        }
+        let most = holders.values().map(|h| h.0).max().unwrap_or(0);
+        let victim = holders
+            .get(requester)
+            .filter(|h| h.0 == most)
+            .or_else(|| holders.values().filter(|h| h.0 == most).min_by_key(|h| h.1))
+            .map(|h| (h.1).1);
+        match victim {
+            Some(key) => {
+                entries.remove(&key);
+            }
+            None => return,
+        }
     }
 }
 
@@ -209,57 +241,14 @@ mod tests {
         })
     }
 
-    #[test]
-    fn addresses_of_one_ipv6_56_share_a_cap_that_refuses() {
-        let tickets = store(100, 10, 2);
-        let doc = Uuid::new_v4();
-        let now = Instant::now();
-        let issue = |key: &str, address: &str| tickets.issue(doc, ip(address), key, None, (), now);
-        let first = issue("a", "2001:db8:0:100::1").expect("a");
-        issue("b", "2001:db8:0:1ff::1").expect("b");
-        assert_eq!(
-            issue("c", "2001:db8:0:1a0::1"),
-            Err(TicketError::Full),
-            "a third holder from the same /56 is refused"
-        );
-        assert_eq!(
-            tickets.redeem(&first, doc, ip("2001:db8:0:100::1"), now),
-            Some(()),
-            "and pushed nobody out"
-        );
-        let other = issue("d", "2001:db8:0:200::1").expect("another /56");
-        assert_eq!(
-            tickets.redeem(&other, doc, ip("2001:db8:0:200::1"), now),
-            Some(())
-        );
-    }
-
-    #[test]
-    fn link_tickets_of_one_owner_are_capped_without_evicting_others() {
-        let tickets = Tickets::new(&LiveConfig {
-            max_link_tickets_per_owner: 2,
-            ..LiveConfig::default()
-        });
-        let doc = Uuid::new_v4();
-        let now = Instant::now();
-        let issue = |key: &str, address: &str, owner: Option<&str>| {
-            tickets.issue(doc, ip(address), key, owner, (), now)
-        };
-        let first = issue("link1", "10.0.0.1", Some("owner")).expect("1");
-        issue("link2", "10.0.0.2", Some("owner")).expect("2");
-        assert_eq!(
-            issue("link1", "10.0.0.5", Some("owner")),
-            Err(TicketError::Full)
-        );
-        let account = issue("actor", "10.0.0.3", None).expect("an account's is not a link's");
-        let other_owner = issue("link3", "10.0.0.4", Some("other")).expect("other owner");
-        assert_eq!(tickets.redeem(&first, doc, ip("10.0.0.1"), now), Some(()));
-        assert_eq!(tickets.redeem(&account, doc, ip("10.0.0.3"), now), Some(()));
-        assert_eq!(
-            tickets.redeem(&other_owner, doc, ip("10.0.0.4"), now),
-            Some(())
-        );
-        issue("link1", "10.0.0.5", Some("owner")).expect("a redeemed one made room");
+    /// Whether `ticket` is still outstanding, without spending it.
+    fn held<T>(tickets: &Tickets<T>, ticket: &str) -> bool {
+        tickets
+            .store
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entries
+            .contains_key(&digest(ticket))
     }
 
     #[test]
@@ -267,72 +256,185 @@ mod tests {
         let tickets = store(10, 10, 10);
         let (doc, other) = (Uuid::new_v4(), Uuid::new_v4());
         let now = Instant::now();
-        let t = tickets
-            .issue(doc, ip("10.0.0.1"), "k", None, "a", now)
-            .expect("ticket");
+        let a = ip("10.0.0.1");
+        let t = tickets.issue(doc, a, "k", None, "a", now).expect("ticket");
         assert_eq!(t.len(), TICKET_CHARS);
-        assert_eq!(tickets.redeem(&t, doc, ip("10.0.0.1"), now), Some("a"));
-        assert_eq!(tickets.redeem(&t, doc, ip("10.0.0.1"), now), None, "reused");
+        assert_eq!(tickets.redeem(&t, doc, a, now), Some("a"));
+        assert_eq!(tickets.redeem(&t, doc, a, now), None, "reused");
 
-        let t = tickets
-            .issue(doc, ip("10.0.0.1"), "k", None, "b", now)
-            .expect("ticket");
-        assert_eq!(tickets.redeem(&t, other, ip("10.0.0.1"), now), None);
-        assert_eq!(tickets.redeem(&t, doc, ip("10.0.0.1"), now), None, "spent");
+        let t = tickets.issue(doc, a, "k", None, "b", now).expect("ticket");
+        assert_eq!(tickets.redeem(&t, other, a, now), None);
+        assert_eq!(tickets.redeem(&t, doc, a, now), None, "spent");
 
-        let t = tickets
-            .issue(doc, ip("10.0.0.1"), "k", None, "c", now)
-            .expect("ticket");
+        let t = tickets.issue(doc, a, "k", None, "c", now).expect("ticket");
         assert_eq!(tickets.redeem(&t, doc, ip("10.0.0.2"), now), None);
 
-        let t = tickets
-            .issue(doc, None, "k", None, "d", now)
-            .expect("ticket");
-        assert_eq!(tickets.redeem(&t, doc, None, now + TTL), None, "expired");
+        let t = tickets.issue(doc, a, "k", None, "d", now).expect("ticket");
+        assert_eq!(tickets.redeem(&t, doc, a, now + TTL), None, "expired");
         assert_eq!(tickets.outstanding(), 0);
     }
 
     #[test]
-    fn malformed_tickets_and_a_full_store_are_refused() {
-        let tickets = store(2, 10, 10);
+    fn malformed_tickets_and_unknown_addresses_are_refused() {
+        let tickets = store(10, 10, 10);
         let doc = Uuid::new_v4();
         let now = Instant::now();
         for bad in ["", "short", &"a".repeat(44), &"\u{e9}".repeat(22)] {
-            assert_eq!(tickets.redeem(bad, doc, None, now), None);
+            assert_eq!(tickets.redeem(bad, doc, ip("10.0.0.1"), now), None);
         }
-        tickets.issue(doc, None, "k", None, 1, now).expect("first");
-        tickets.issue(doc, None, "k", None, 2, now).expect("second");
         assert_eq!(
-            tickets.issue(doc, None, "k", None, 3, now),
-            Err(TicketError::Full)
+            tickets.issue(doc, None, "k", None, 1, now),
+            Err(TicketError::NoAddress)
         );
-        tickets
-            .issue(doc, None, "k", None, 4, now + TTL)
-            .expect("expired ones make room");
-        assert_eq!(tickets.outstanding(), 1);
+        assert_eq!(tickets.outstanding(), 0);
     }
 
     #[test]
-    fn a_holder_keeps_its_most_recent_tickets_and_a_full_network_refuses() {
-        let tickets = store(100, 2, 3);
+    fn a_holder_keeps_its_most_recent_tickets() {
+        let tickets = store(100, 2, 100);
         let doc = Uuid::new_v4();
         let now = Instant::now();
-        let issue =
-            |key: &str, address: &str, n: u32| tickets.issue(doc, ip(address), key, None, n, now);
-        let first = issue("a", "10.0.0.1", 1).expect("1");
-        let second = issue("a", "10.0.0.2", 2).expect("2");
-        let third = issue("a", "10.0.0.3", 3).expect("3");
+        let issue = |n: u32, address: &str| {
+            tickets
+                .issue(doc, ip(address), "a", None, n, now)
+                .expect("ticket")
+        };
+        let first = issue(1, "10.0.0.1");
+        let second = issue(2, "10.0.0.2");
+        let third = issue(3, "10.0.0.3");
         assert_eq!(tickets.redeem(&first, doc, ip("10.0.0.1"), now), None);
-
-        let from_b = issue("b", "10.0.0.9", 4).expect("4");
-        let from_c = issue("c", "10.0.0.9", 5).expect("5");
-        let from_d = issue("d", "10.0.0.9", 6).expect("6");
-        assert_eq!(issue("e", "10.0.0.9", 7), Err(TicketError::Full));
-        for (t, n) in [(&from_b, 4), (&from_c, 5), (&from_d, 6)] {
-            assert_eq!(tickets.redeem(t, doc, ip("10.0.0.9"), now), Some(n));
-        }
         assert_eq!(tickets.redeem(&second, doc, ip("10.0.0.2"), now), Some(2));
         assert_eq!(tickets.redeem(&third, doc, ip("10.0.0.3"), now), Some(3));
-        assert_eq!(tickets.outstanding(), 0);
+    }
+
+    #[test]
+    fn whoever_fills_a_network_pushes_out_its_own_tickets_only() {
+        // A /56 holds 8 tickets; one holder at most a quarter of that, 2.
+        let tickets = store(100, 20, 8);
+        let doc = Uuid::new_v4();
+        let now = Instant::now();
+        let issue = |key: &str, address: &str| {
+            tickets
+                .issue(doc, ip(address), key, None, (), now)
+                .expect("ticket")
+        };
+        let victim = issue("victim", "2001:db8:0:100::1");
+        let mut attacker = Vec::new();
+        for n in 0..20 {
+            attacker.push(issue(&format!("attacker{}", n % 4), "2001:db8:0:1ff::1"));
+        }
+        assert!(held(&tickets, &victim), "the light holder keeps its ticket");
+        assert_eq!(
+            tickets.redeem(&victim, doc, ip("2001:db8:0:100::1"), now),
+            Some(())
+        );
+        assert!(
+            !held(&tickets, &attacker[0]),
+            "the attackers lost their oldest"
+        );
+        assert!(held(&tickets, &attacker[19]));
+        let elsewhere = issue("other", "2001:db8:0:200::1");
+        assert!(held(&tickets, &elsewhere));
+    }
+
+    #[test]
+    fn one_holder_takes_at_most_a_quarter_of_its_network() {
+        let tickets = store(100, 20, 8);
+        let doc = Uuid::new_v4();
+        let now = Instant::now();
+        let issue = |address: &str| {
+            tickets
+                .issue(doc, ip(address), "a", None, (), now)
+                .expect("ticket")
+        };
+        let first = issue("10.0.0.1");
+        let second = issue("10.0.0.1");
+        let third = issue("10.0.0.1");
+        assert!(!held(&tickets, &first));
+        assert!(held(&tickets, &second) && held(&tickets, &third));
+        let elsewhere = issue("10.0.0.2");
+        assert!(
+            held(&tickets, &second),
+            "another network has its own quarter"
+        );
+        assert!(held(&tickets, &elsewhere));
+    }
+
+    #[test]
+    fn the_requester_evicts_its_own_ticket_on_a_tie() {
+        // Eight holders with one ticket each fill the network; the quarter (2) is not reached.
+        let tickets = store(100, 20, 8);
+        let doc = Uuid::new_v4();
+        let now = Instant::now();
+        let issue = |key: &str| {
+            tickets
+                .issue(doc, ip("10.0.0.1"), key, None, (), now)
+                .expect("ticket")
+        };
+        let others: Vec<String> = ["b", "c", "d", "e", "f", "g", "h"]
+            .into_iter()
+            .map(issue)
+            .collect();
+        let a1 = issue("a");
+        let a2 = issue("a");
+        assert!(others.iter().all(|t| held(&tickets, t)));
+        assert!(
+            !held(&tickets, &a1),
+            "a, tied with the others, pushed out its own"
+        );
+        assert!(held(&tickets, &a2));
+    }
+
+    #[test]
+    fn the_whole_store_evicts_the_heaviest_holder() {
+        let tickets = store(4, 20, 100);
+        let doc = Uuid::new_v4();
+        let now = Instant::now();
+        let issue = |key: &str, n: u8| {
+            tickets
+                .issue(doc, Some(IpAddr::from([10, 0, 0, n])), key, None, (), now)
+                .expect("ticket")
+        };
+        let light = issue("light", 1);
+        let heavy: Vec<String> = (2..5).map(|n| issue("heavy", n)).collect();
+        let newcomer = issue("new", 9);
+        assert!(held(&tickets, &light));
+        assert!(!held(&tickets, &heavy[0]));
+        assert!(held(&tickets, &newcomer));
+        assert_eq!(tickets.outstanding(), 4);
+    }
+
+    #[test]
+    fn one_owners_links_are_capped_by_the_heaviest_and_per_network() {
+        let tickets = Tickets::new(&LiveConfig {
+            max_link_tickets_per_owner: 8,
+            ..LiveConfig::default()
+        });
+        let doc = Uuid::new_v4();
+        let now = Instant::now();
+        let issue = |key: &str, address: &str, owner: Option<&str>| {
+            tickets
+                .issue(doc, ip(address), key, owner, (), now)
+                .expect("ticket")
+        };
+        let victim = issue("link1:a", "10.0.0.1", Some("owner"));
+        // One network takes an eighth of the owner's links: 1 ticket.
+        let first = issue("link2:b", "10.0.0.2", Some("owner"));
+        let second = issue("link3:b", "10.0.0.2", Some("owner"));
+        assert!(!held(&tickets, &first) && held(&tickets, &second));
+        let mut attacker = Vec::new();
+        for n in 3..20 {
+            attacker.push(issue("link9:x", &format!("10.0.1.{n}"), Some("owner")));
+        }
+        let account = issue("actor:z", "10.0.0.5", None);
+        assert!(held(&tickets, &victim));
+        assert!(held(&tickets, &second));
+        assert!(
+            held(&tickets, &account),
+            "an account's ticket is not a link's"
+        );
+        assert!(!held(&tickets, &attacker[0]));
+        let other_owner = issue("link5:c", "10.0.0.6", Some("other"));
+        assert!(held(&tickets, &other_owner));
     }
 }

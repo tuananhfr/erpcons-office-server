@@ -85,8 +85,7 @@ pub(crate) async fn ticket(
             Instant::now(),
         )
         .map_err(|e| match e {
-            TicketError::Full => ApiError::retry_after(ErrorCode::Unavailable, 1),
-            TicketError::Random => ErrorCode::Unavailable.into(),
+            TicketError::NoAddress | TicketError::Random => ApiError::from(ErrorCode::Unavailable),
         })?;
     Ok(Json(LiveTicketDto {
         ticket,

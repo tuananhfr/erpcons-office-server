@@ -51,7 +51,8 @@ is `docs/openapi.yaml`. The approved plans are `erpcons-workspace/tmp/briefs/off
   `NOT_LEADER`. Co-editing (plan-m4): region locks with a 5 s lease, `region.update` ordered by the room's `seq`
   and kept since the last save for replay, the leader's `X-Live-Seq` trims it; answers go through the member's
   ordered queue (only a replay is written straight to the socket). Live logs carry outcomes only: no document id,
-  member, name, region, payload or ticket. A ticket only ever evicts its own holder's tickets; shared caps refuse.
+  member, name, region, payload or ticket. A cap of the ticket store evicts the oldest ticket of its heaviest holder (the requester on a tie), never a
+  lighter one's.
 - **Intake rules are shared with the site**: change `crates/documents/tests/intake_vectors.json` together with the
   site's `intake-contract.ts`; the vector test fails when they drift.
 - Fail points (`FailPoint`) exist for tests only (`testing` feature); never arm them elsewhere.

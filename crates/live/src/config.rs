@@ -12,9 +12,9 @@ pub struct LiveConfig {
     /// Unredeemed tickets of one holder (an account, or a public link from one client network); a
     /// new one past this replaces the holder's own oldest.
     pub max_tickets_per_holder: usize,
-    /// Unredeemed tickets from one client network (an IPv6 client by its /56), and through the
-    /// public links of one owner's documents. Shared with others, so past either a new ticket is
-    /// refused rather than pushing out someone else's.
+    /// Unredeemed tickets from one client network (an IPv6 client by its /56; one holder a quarter
+    /// of it), and through the public links of one owner's documents (one network an eighth).
+    /// Shared with others: past either the heaviest holder there loses its oldest ticket.
     pub max_tickets_per_address: usize,
     pub max_link_tickets_per_owner: usize,
     /// Largest message or frame a client may send, `region.update` aside.
