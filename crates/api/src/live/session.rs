@@ -80,50 +80,56 @@ pub(crate) async fn run(mut socket: WebSocket, session: Session) {
     recheck.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let shutdown = hub.shutdown_token().clone();
 
-    let end = loop {
-        tokio::select! {
-            frame = socket.recv() => {
-                let Some(Ok(frame)) = frame else {
-                    break End::Gone;
-                };
-                last_heard = Instant::now();
-                if let Some(end) = on_frame(&mut socket, &membership, &mut rate, frame, grace).await {
-                    break end;
-                }
-            }
-            event = events.recv() => match event {
-                Some(Event::Send(text)) => {
-                    if send(&mut socket, text, grace).await.is_err() {
+    let end = 'session: {
+        // A change committed between the check at the upgrade and the join reached no room.
+        if let Some(end) = recheck_access(&session, &membership).await {
+            break 'session end;
+        }
+        loop {
+            tokio::select! {
+                frame = socket.recv() => {
+                    let Some(Ok(frame)) = frame else {
                         break End::Gone;
+                    };
+                    last_heard = Instant::now();
+                    if let Some(end) = on_frame(&mut socket, &membership, &mut rate, frame, grace).await {
+                        break end;
                     }
                 }
-                Some(Event::Close(reason)) => break End::Bye(reason),
-                Some(Event::Recheck) => {
-                    membership.recheck_started();
+                event = events.recv() => match event {
+                    Some(Event::Send(text)) => {
+                        if send(&mut socket, text, grace).await.is_err() {
+                            break End::Gone;
+                        }
+                    }
+                    Some(Event::Close(reason)) => break End::Bye(reason),
+                    Some(Event::Recheck) => {
+                        membership.recheck_started();
+                        if let Some(end) = recheck_access(&session, &membership).await {
+                            break end;
+                        }
+                    }
+                    // The room dropped this member: it fell behind.
+                    None => break End::Bye(ByeReason::Overloaded),
+                },
+                _ = tick.tick() => {
+                    if last_heard.elapsed() >= config.idle_timeout {
+                        break End::Bye(ByeReason::Timeout);
+                    }
+                    if last_ping.elapsed() >= config.ping_interval {
+                        last_ping = Instant::now();
+                        if send_frame(&mut socket, Message::Ping(Default::default()), grace).await.is_err() {
+                            break End::Gone;
+                        }
+                    }
+                }
+                _ = recheck.tick() => {
                     if let Some(end) = recheck_access(&session, &membership).await {
                         break end;
                     }
                 }
-                // The room dropped this member: it fell behind.
-                None => break End::Bye(ByeReason::Overloaded),
-            },
-            _ = tick.tick() => {
-                if last_heard.elapsed() >= config.idle_timeout {
-                    break End::Bye(ByeReason::Timeout);
-                }
-                if last_ping.elapsed() >= config.ping_interval {
-                    last_ping = Instant::now();
-                    if send_frame(&mut socket, Message::Ping(Default::default()), grace).await.is_err() {
-                        break End::Gone;
-                    }
-                }
+                () = shutdown.cancelled() => break End::Bye(ByeReason::Shutdown),
             }
-            _ = recheck.tick() => {
-                if let Some(end) = recheck_access(&session, &membership).await {
-                    break end;
-                }
-            }
-            () = shutdown.cancelled() => break End::Bye(ByeReason::Shutdown),
         }
     };
     // Leave first, so the others see it even if the goodbye below cannot be delivered.
