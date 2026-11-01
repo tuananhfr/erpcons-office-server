@@ -85,6 +85,8 @@ pub(crate) async fn ticket(
             Instant::now(),
         )
         .map_err(|e| match e {
+            // Tickets are spent or lapse within the TTL, freeing room.
+            TicketError::Full => ApiError::retry_after(ErrorCode::Unavailable, 1),
             TicketError::NoAddress | TicketError::Random => ApiError::from(ErrorCode::Unavailable),
         })?;
     Ok(Json(LiveTicketDto {

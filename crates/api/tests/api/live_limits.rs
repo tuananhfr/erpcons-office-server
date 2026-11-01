@@ -13,7 +13,7 @@ use crate::{
         wait_members,
     },
     people::{enable_link, upload},
-    support::{TestApp, ok_json},
+    support::{TestApp, expect_error, ok_json},
 };
 
 #[tokio::test]
@@ -363,6 +363,35 @@ async fn filling_an_owners_link_cap_pushes_out_only_ones_own_tickets() {
     // An account's ticket is not a link ticket.
     let (_wa, hello) = join(&app, &a, &doc).await;
     assert_eq!(hello["mode"], "edit");
+}
+
+#[tokio::test]
+async fn spreading_link_tickets_over_networks_cannot_push_out_anothers() {
+    let Some(app) = TestApp::spawn_with(|s| {
+        s.api.trust_forwarded_for = true;
+        s.api.live = LiveConfig {
+            max_link_tickets_per_owner: 2,
+            ..LiveConfig::default()
+        };
+    })
+    .await
+    else {
+        return;
+    };
+    let (a, _, _, doc, _) = shared_document(&app).await;
+    let link = enable_link(&app, &a, &doc).await;
+    let victim = link_ticket_from(&app, &link, &doc, "203.0.113.1").await;
+    link_ticket_from(&app, &link, &doc, "198.51.100.1").await;
+    let full = ticket_request_from(&app, &link, true, &doc, "198.51.100.2").await;
+    let retry = full
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    expect_error(full, 503, "UNAVAILABLE", true).await;
+    assert_eq!(retry.as_deref(), Some("1"));
+    let mut ws = connect_from(&app, &doc, &victim, "203.0.113.1").await;
+    ws.next_of("hello").await;
 }
 
 #[tokio::test]

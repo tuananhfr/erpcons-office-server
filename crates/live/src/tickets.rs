@@ -2,10 +2,13 @@
 //! a WebSocket, so the client trades its token for a ticket and puts only that in the URL; the
 //! ticket is short-lived, single-use, bound to one document and the client address, and held only
 //! as its sha256. Caps bound what one holder (an account, or a link from one client network), one
-//! client network, one owner's public links and the whole store hold; a new ticket past a cap makes
-//! room by evicting the oldest ticket of the heaviest holder in that cap, the requester itself on a
-//! tie. Whoever fills a cap so pushes out its own tickets first, never a light user's.
+//! client network, one owner's public links and the whole store hold. A new ticket past a cap
+//! pushes out the oldest ticket of whoever holds the most there (holders within a network, client
+//! networks across them), but someone else's only while they would still hold more than the
+//! requester; else the requester's own, and with none it is refused. Spreading tickets over many
+//! keys or networks so never pushes out a light user's ticket.
 use std::{
+    cmp::Reverse,
     collections::HashMap,
     net::IpAddr,
     sync::{Mutex, PoisonError},
@@ -27,6 +30,8 @@ const TICKET_CHARS: usize = 43;
 pub enum TicketError {
     /// The client address is unknown; a shared unknown bucket would let anyone crowd it.
     NoAddress,
+    /// A cap is full and nobody in it holds more than the requester would.
+    Full,
     /// The system random source failed.
     Random,
 }
@@ -87,7 +92,7 @@ impl<T> Tickets<T> {
         address: Option<IpAddr>,
         holder_key: &str,
         link_owner: Option<&str>,
-        holder: T,
+        holder_value: T,
         now: Instant,
     ) -> Result<String, TicketError> {
         if address.is_none() {
@@ -103,28 +108,29 @@ impl<T> Tickets<T> {
         // Full passes: the store holds at most `max` entries, and issuing is rate limited.
         store.entries.retain(|_, e| e.expires > now);
         let entries = &mut store.entries;
-        make_room(entries, holder_key, self.per_holder, |e| {
+        let holder = Group::Holder(holder_key);
+        let from = Group::Network(network);
+        make_room(entries, holder, self.per_holder, |e| {
             e.holder_key == holder_key
-        });
+        })?;
         // One holder takes at most a quarter of its network's share, one network an eighth of an
         // owner's links: filling a shared cap takes several of them.
-        make_room(entries, holder_key, (self.per_address / 4).max(1), |e| {
+        make_room(entries, holder, (self.per_address / 4).max(1), |e| {
             e.holder_key == holder_key && e.network == network
-        });
+        })?;
         if let Some(owner) = link_owner {
-            make_room(entries, holder_key, (self.per_owner / 8).max(1), |e| {
+            make_room(entries, holder, (self.per_owner / 8).max(1), |e| {
                 e.owner.as_deref() == Some(owner) && e.network == network
-            });
+            })?;
         }
-        make_room(entries, holder_key, self.per_address, |e| {
-            e.network == network
-        });
+        make_room(entries, holder, self.per_address, |e| e.network == network)?;
+        // Across networks fairness counts networks: a link holder's key is cheap to multiply.
         if let Some(owner) = link_owner {
-            make_room(entries, holder_key, self.per_owner, |e| {
+            make_room(entries, from, self.per_owner, |e| {
                 e.owner.as_deref() == Some(owner)
-            });
+            })?;
         }
-        make_room(entries, holder_key, self.max, |_| true);
+        make_room(entries, from, self.max, |_| true)?;
         let issued = store.next;
         store.next += 1;
         store.entries.insert(
@@ -135,7 +141,7 @@ impl<T> Tickets<T> {
                 network,
                 holder_key: holder_key.to_owned(),
                 owner: link_owner.map(str::to_owned),
-                holder,
+                holder: holder_value,
                 expires: now + self.ttl,
                 issued,
             },
@@ -178,42 +184,60 @@ impl<T> Tickets<T> {
     }
 }
 
-/// Evicts until one more ticket fits under `limit` among the entries `in_cap`: each time the
-/// oldest ticket of the holder with the most there, `requester` on a tie, else the tied holder
-/// with the oldest ticket.
+/// Whom a cap weighs against each other: holders, or client networks.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Group<'a> {
+    Holder(&'a str),
+    Network(Option<IpAddr>),
+}
+
+impl<'a> Group<'a> {
+    fn of<T>(self, e: &'a Entry<T>) -> Self {
+        match self {
+            Self::Holder(_) => Self::Holder(&e.holder_key),
+            Self::Network(_) => Self::Network(e.network),
+        }
+    }
+}
+
+/// Evicts until one more ticket fits under `limit` among the entries `in_cap`: the oldest ticket of
+/// the heaviest other group while it holds at least two more than `requester`, else the
+/// requester's own oldest; `Full` when the requester has none there.
 fn make_room<T>(
     entries: &mut HashMap<[u8; 32], Entry<T>>,
-    requester: &str,
+    requester: Group<'_>,
     limit: usize,
     in_cap: impl Fn(&Entry<T>) -> bool,
-) {
+) -> Result<(), TicketError> {
     loop {
-        // Per holder: tickets in the cap, and its oldest (issue number, key).
-        let mut holders: HashMap<&str, (usize, (u64, [u8; 32]))> = HashMap::new();
+        // Per group: tickets in the cap, and its oldest (issue number, key).
+        let mut groups: HashMap<Group<'_>, (usize, (u64, [u8; 32]))> = HashMap::new();
         let mut total = 0;
         for (key, e) in entries.iter().filter(|(_, e)| in_cap(e)) {
             total += 1;
-            let slot = holders
-                .entry(e.holder_key.as_str())
+            let slot = groups
+                .entry(requester.of(e))
                 .or_insert((0, (e.issued, *key)));
             slot.0 += 1;
             slot.1 = slot.1.min((e.issued, *key));
         }
         if total < limit.max(1) {
-            return;
+            return Ok(());
         }
-        let most = holders.values().map(|h| h.0).max().unwrap_or(0);
-        let victim = holders
-            .get(requester)
-            .filter(|h| h.0 == most)
-            .or_else(|| holders.values().filter(|h| h.0 == most).min_by_key(|h| h.1))
-            .map(|h| (h.1).1);
-        match victim {
-            Some(key) => {
-                entries.remove(&key);
-            }
-            None => return,
-        }
+        let mine = groups.get(&requester).copied();
+        let held = mine.map_or(0, |g| g.0);
+        let heaviest = groups
+            .iter()
+            .filter(|(group, _)| **group != requester)
+            .map(|(_, g)| *g)
+            .max_by_key(|g| (g.0, Reverse(g.1)));
+        // Equal after the request is not heavier: taking from a tie lets many light keys evict.
+        let victim = match (heaviest, mine) {
+            (Some(other), _) if other.0 > held + 1 => other,
+            (_, Some(own)) => own,
+            _ => return Err(TicketError::Full),
+        };
+        entries.remove(&(victim.1).1);
     }
 }
 
@@ -386,22 +410,76 @@ mod tests {
     }
 
     #[test]
-    fn the_whole_store_evicts_the_heaviest_holder() {
+    fn many_keys_with_one_ticket_each_cannot_push_out_a_light_holder() {
+        let tickets = store(100, 20, 8);
+        let doc = Uuid::new_v4();
+        let now = Instant::now();
+        let victim = tickets
+            .issue(doc, ip("10.0.0.1"), "victim", None, (), now)
+            .expect("ticket");
+        let refused = (0..20)
+            .map(|n| tickets.issue(doc, ip("10.0.0.1"), &format!("k{n}"), None, (), now))
+            .filter(|t| *t == Err(TicketError::Full))
+            .count();
+        assert_eq!(
+            refused, 13,
+            "seven fit beside the victim, then nobody is heavier"
+        );
+        assert_eq!(tickets.redeem(&victim, doc, ip("10.0.0.1"), now), Some(()));
+    }
+
+    #[test]
+    fn a_heavy_holder_is_pushed_out_first() {
+        // The quarter of a network of 8 is 2: "heavy" holds 2, a newcomer none.
+        let tickets = store(100, 20, 8);
+        let doc = Uuid::new_v4();
+        let now = Instant::now();
+        let issue = |key: &str| {
+            tickets
+                .issue(doc, ip("10.0.0.1"), key, None, (), now)
+                .expect("ticket")
+        };
+        let heavy = [issue("heavy"), issue("heavy")];
+        let light: Vec<String> = ["b", "c", "d", "e", "f", "g"]
+            .into_iter()
+            .map(issue)
+            .collect();
+        let newcomer = issue("new");
+        assert!(!held(&tickets, &heavy[0]) && held(&tickets, &heavy[1]));
+        assert!(light.iter().all(|t| held(&tickets, t)));
+        assert!(held(&tickets, &newcomer));
+    }
+
+    #[test]
+    fn the_whole_store_weighs_networks_not_keys() {
         let tickets = store(4, 20, 100);
         let doc = Uuid::new_v4();
         let now = Instant::now();
         let issue = |key: &str, n: u8| {
-            tickets
-                .issue(doc, Some(IpAddr::from([10, 0, 0, n])), key, None, (), now)
-                .expect("ticket")
+            tickets.issue(doc, Some(IpAddr::from([10, 0, 0, n])), key, None, (), now)
         };
-        let light = issue("light", 1);
-        let heavy: Vec<String> = (2..5).map(|n| issue("heavy", n)).collect();
-        let newcomer = issue("new", 9);
+        let light = issue("light", 1).expect("ticket");
+        let heavy: Vec<String> = ["h1", "h2", "h3"]
+            .into_iter()
+            .map(|key| issue(key, 2).expect("ticket"))
+            .collect();
+        let newcomer = issue("new", 9).expect("ticket");
         assert!(held(&tickets, &light));
-        assert!(!held(&tickets, &heavy[0]));
+        assert!(!held(&tickets, &heavy[0]), "one network under three keys");
         assert!(held(&tickets, &newcomer));
         assert_eq!(tickets.outstanding(), 4);
+
+        let spread = store::<()>(4, 20, 100);
+        for n in 1..5 {
+            spread
+                .issue(doc, Some(IpAddr::from([10, 0, 0, n])), "k", None, (), now)
+                .expect("ticket");
+        }
+        assert_eq!(
+            spread.issue(doc, ip("10.0.0.9"), "new", None, (), now),
+            Err(TicketError::Full),
+            "nobody holds more than a newcomer would"
+        );
     }
 
     #[test]
@@ -420,12 +498,30 @@ mod tests {
         let victim = issue("link1:a", "10.0.0.1", Some("owner"));
         // One network takes an eighth of the owner's links: 1 ticket.
         let first = issue("link2:b", "10.0.0.2", Some("owner"));
-        let second = issue("link3:b", "10.0.0.2", Some("owner"));
+        let second = issue("link2:b", "10.0.0.2", Some("owner"));
         assert!(!held(&tickets, &first) && held(&tickets, &second));
-        let mut attacker = Vec::new();
-        for n in 3..20 {
-            attacker.push(issue("link9:x", &format!("10.0.1.{n}"), Some("owner")));
-        }
+        assert_eq!(
+            tickets.issue(doc, ip("10.0.0.2"), "link3:b", Some("owner"), (), now),
+            Err(TicketError::Full),
+            "another link from that network does not take its place"
+        );
+        let refused = (3..20)
+            .map(|n| {
+                tickets.issue(
+                    doc,
+                    ip(&format!("10.0.1.{n}")),
+                    &format!("link9:{n}"),
+                    Some("owner"),
+                    (),
+                    now,
+                )
+            })
+            .filter(|t| *t == Err(TicketError::Full))
+            .count();
+        assert_eq!(
+            refused, 11,
+            "six networks fit, then none holds more than a newcomer"
+        );
         let account = issue("actor:z", "10.0.0.5", None);
         assert!(held(&tickets, &victim));
         assert!(held(&tickets, &second));
@@ -433,7 +529,6 @@ mod tests {
             held(&tickets, &account),
             "an account's ticket is not a link's"
         );
-        assert!(!held(&tickets, &attacker[0]));
         let other_owner = issue("link5:c", "10.0.0.6", Some("other"));
         assert!(held(&tickets, &other_owner));
     }
