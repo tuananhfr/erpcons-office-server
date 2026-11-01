@@ -12,7 +12,7 @@ use ring::hmac;
 use tokio::sync::mpsc::{self, error::TrySendError};
 use uuid::Uuid;
 
-pub(crate) use editing::Replay;
+pub(crate) use editing::{Replay, Update};
 
 use crate::{
     ByeReason, Event, LiveConfig, LockTable, MemberId, Mode, Notice, Participant, PresenceState,

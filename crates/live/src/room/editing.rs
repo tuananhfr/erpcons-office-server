@@ -9,8 +9,16 @@ use super::Room;
 use crate::{
     Event, LiveConfig, MemberId, Mode,
     locks::Refusal,
+    log::acked_reserve,
     protocol::{self, LiveErrorCode},
 };
+
+/// A client's `region.update`.
+pub(crate) struct Update<'a> {
+    pub region: &'a str,
+    pub cid: &'a str,
+    pub payload: &'a str,
+}
 
 /// What a `region.replay` gets, sent straight to the socket: the queue could not hold a whole log.
 pub(crate) enum Replay {
@@ -96,15 +104,21 @@ impl Room {
 
     /// Logs and relays an update of a region the sender holds; a resend of a `cid` already taken
     /// gets the same `ack` again and changes nothing.
+    /// `room_left`: whether the node's log budget takes it; if not it is refused `SERVER_BUSY`
+    /// (with `cid`) for the client to send again later.
     pub fn update(
         &mut self,
         config: &LiveConfig,
         id: MemberId,
-        region: &str,
-        cid: &str,
-        payload: &str,
+        update: Update<'_>,
+        room_left: bool,
         now: Instant,
     ) {
+        let Update {
+            region,
+            cid,
+            payload,
+        } = update;
         if !self.may_edit(id, Some(cid)) {
             return self.settle(config);
         }
@@ -124,6 +138,11 @@ impl Room {
         }
         if !self.locks.touch(region, id, config.lock_ttl, now) {
             let text = protocol::error_for(LiveErrorCode::LockRequired, cid);
+            self.deliver(id, Event::Send(text.into()));
+            return self.settle(config);
+        }
+        if !room_left {
+            let text = protocol::error_for(LiveErrorCode::ServerBusy, cid);
             self.deliver(id, Event::Send(text.into()));
             return self.settle(config);
         }
@@ -214,9 +233,19 @@ impl Room {
         self.settle(config);
     }
 
-    /// Estimated heap bytes of the room's log, for the node's budget.
+    /// What the room's log is charged on the node's budget.
     pub fn log_memory(&self) -> usize {
         self.log.memory()
+    }
+
+    /// What one more update of `bytes` adds to the node's budget, the remembered ids' reserve
+    /// included on the room's first.
+    pub fn log_cost(&self, config: &LiveConfig, bytes: usize) -> usize {
+        if self.log.charged() {
+            bytes
+        } else {
+            bytes + acked_reserve(config.max_acked_cids)
+        }
     }
 
     /// Sheds the log to at most `target` bytes for the node's budget; the leader is asked to save

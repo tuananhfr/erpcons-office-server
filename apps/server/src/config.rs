@@ -170,8 +170,7 @@ impl ServerConfig {
                     "ERPCONS_LIVE_MAX_CONNECTIONS",
                     defaults.live.max_connections,
                 )?,
-                max_region_message_bytes: vars
-                    .region_bytes(defaults.live.region_bytes_burst as usize)?,
+                max_region_message_bytes: vars.region_bytes(&defaults.live)?,
                 max_log_bytes: vars
                     .positive("ERPCONS_LIVE_MAX_LOG_BYTES", defaults.live.max_log_bytes)?,
                 max_total_log_bytes: vars.positive(
@@ -181,6 +180,10 @@ impl ServerConfig {
                 ..defaults.live.clone()
             },
         };
+        // Below one full room log, a single room would shed on every update.
+        if api.live.max_total_log_bytes < api.live.max_log_bytes {
+            return Err(ConfigError::Invalid("ERPCONS_LIVE_MAX_TOTAL_LOG_BYTES"));
+        }
 
         let jobs = vars.jobs()?;
 
@@ -326,10 +329,10 @@ impl<F: Fn(&str) -> Option<String>> Vars<F> {
     }
 
     /// The largest `region.update`; above the region byte burst no such update could ever pass.
-    fn region_bytes(&self, burst: usize) -> Result<usize, ConfigError> {
+    fn region_bytes(&self, defaults: &LiveConfig) -> Result<usize, ConfigError> {
         const NAME: &str = "ERPCONS_LIVE_MAX_REGION_BYTES";
-        match self.positive(NAME, LiveConfig::default().max_region_message_bytes)? {
-            n if n > burst => Err(ConfigError::Invalid(NAME)),
+        match self.positive(NAME, defaults.max_region_message_bytes)? {
+            n if n > defaults.region_bytes_burst as usize => Err(ConfigError::Invalid(NAME)),
             n => Ok(n),
         }
     }
@@ -672,6 +675,7 @@ mod tests {
             ("ERPCONS_LIVE_MAX_REGION_BYTES", "0"),
             ("ERPCONS_LIVE_MAX_LOG_BYTES", "-1"),
             ("ERPCONS_LIVE_MAX_TOTAL_LOG_BYTES", "0"),
+            ("ERPCONS_LIVE_MAX_TOTAL_LOG_BYTES", "8388607"),
             ("ERPCONS_LIVE_MAX_REGION_BYTES", "4194305"),
         ] {
             assert_eq!(

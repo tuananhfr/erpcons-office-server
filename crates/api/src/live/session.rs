@@ -41,6 +41,8 @@ pub(super) enum End {
     Close(CloseCode),
     /// The client said `bye`.
     ClientBye,
+    /// The transport refused a frame over the size limit; closes with 1009.
+    Oversized,
     /// The connection is gone, or closed by the client.
     Gone,
 }
@@ -102,7 +104,7 @@ pub(crate) async fn run(mut socket: WebSocket, session: Session) {
                 frame = socket.recv() => {
                     let frame = match frame {
                         Some(Ok(frame)) => frame,
-                        Some(Err(e)) if over_limit(&e) => break End::Close(CloseCode::TooBig),
+                        Some(Err(e)) if over_limit(&e) => break End::Oversized,
                         _ => break End::Gone,
                     };
                     last_heard = Instant::now();
@@ -158,6 +160,13 @@ pub(crate) async fn run(mut socket: WebSocket, session: Session) {
             close(&mut socket, code, grace).await;
         }
         End::ClientBye => close(&mut socket, CloseCode::Normal, grace).await,
+        End::Oversized => {
+            debug!(code = CloseCode::TooBig.code(), "live session closed");
+            close(&mut socket, CloseCode::TooBig, grace).await;
+            // The socket reads nothing more, so the client's close never comes; dropping it with
+            // the rest of the frame unread resets the connection, which may discard our code.
+            tokio::time::sleep(OVERSIZED_LINGER).await;
+        }
         End::Gone => {}
     }
 }
@@ -288,6 +297,8 @@ async fn send_frame(socket: &mut WebSocket, frame: Message, grace: Duration) -> 
 
 /// How long a closing session waits for the client's own close frame.
 const CLOSE_WAIT: Duration = Duration::from_secs(2);
+/// How long the close frame gets to reach a client whose oversized frame is left unread.
+const OVERSIZED_LINGER: Duration = Duration::from_millis(500);
 
 async fn close(socket: &mut WebSocket, code: CloseCode, grace: Duration) {
     let frame = CloseFrame {

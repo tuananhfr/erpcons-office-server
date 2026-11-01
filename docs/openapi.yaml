@@ -184,17 +184,23 @@ info:
       holders included). Answers, others' updates and every other event reach a client through one ordered queue,
       so a client sees `ack` and `region.update` in `seq` order. A `cid` resent by the same account (after a
       reconnect too) gets its first `ack` again and is not applied twice; a room remembers the last 4096 `cid`s.
-      The memory lives with the room: a room that closed (its last member gone 30 s, or a restart) remembers
-      nothing, so after `REPLAY_GONE` a client reloads the content and derives its edits again instead of resending
-      old `cid`s.
+      A room never forgets them for lack of memory, but a closed room (its last member left or timed out, or
+      the server restarted) is gone with them: a reconnecting client meets that room's successor as `REPLAY_GONE`
+      (its `since` is not a seq of the new room), and then reloads the content and derives its edits again instead
+      of resending old `cid`s. This is the only safe rule: the server cannot tell whether an unknown `cid` was
+      applied before.
     - *Seq.* One counter numbers every change of a room (presence, modes, locks, updates), so `region.update` seqs
       have gaps. Values are opaque, increasing, below 2^53; a room opened again (also after a restart) numbers
       above everything before it. A client drops a `region.update` whose `seq` is not above the highest it applied.
     - *Log and replay.* A room keeps the `region.update`s since the last save, up to 8 MiB; past that the oldest go
       and the leader gets `save.request` (once until the next save; a new leader is asked again). All rooms of a
-      server share a budget (256 MiB with their remembered `cid`s): past it the largest logs lose their oldest
-      updates the same way. A save that leaves updates the log no longer holds (its `X-Live-Seq` is below them)
-      asks the leader again at once. `region.replay`
+      server share a budget (512 MiB); a room is charged its kept updates and, from its first update, its 4096
+      remembered `cid`s at their full size (192 KiB). When an update does not fit, the rooms above their fair share
+      (the budget split among open rooms, at least 512 KiB) lose their oldest updates, evened down from the largest,
+      the same way as above; rooms within their share never lose theirs. If that is not enough the update is
+      refused with `error` `SERVER_BUSY` and its `cid`: nothing was applied, the client keeps it and sends it again
+      later (after a `saved`, or a few seconds). A save that leaves updates the log no longer holds (its
+      `X-Live-Seq` is below them) asks the leader again at once. `region.replay`
       with `since` answers, straight away, every kept update with a higher `seq` then `region.replayed`, or `error`
       `REPLAY_GONE` with `saved_seq` and `saved_version` when updates after `since` are gone or `since` is not a
       seq of this room: reload the content (`X-Document-Version` at least `saved_version`) and replay from
@@ -1549,7 +1555,9 @@ components:
         - REPLAY_GONE
       description: >-
         `RATE_LIMITED` is followed by `bye` and close 4008; `ROOM_FULL`, `TOO_MANY_CONNECTIONS` and `SERVER_BUSY`
-        refuse a join and are followed by close 4029 (1001 while shutting down). The others leave the connection open.
+        refuse a join and are followed by close 4029 (1001 while shutting down). `SERVER_BUSY` with a `cid` refuses
+        only that `region.update` (the server's log budget is full; send it again later). The others leave the
+        connection open.
         `FORBIDDEN_MODE`: the member's mode does not allow the message; `LOCK_REQUIRED`: a `region.update` without a
         covering lock; `LOCK_LIMIT`: the member holds 64 locks; `REPLAY_GONE`: the room no longer holds every update
         after `since`.

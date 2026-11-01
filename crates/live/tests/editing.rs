@@ -517,38 +517,118 @@ fn a_save_older_than_the_log_asks_again() {
     );
 }
 
-#[test]
-fn the_node_sheds_the_largest_logs_first() {
-    let hub = hub(|c| c.max_total_log_bytes = 8000);
-    let (big, small) = (Uuid::new_v4(), Uuid::new_v4());
-    let mut a = join(&hub, big, user("a"), Mode::Edit);
-    let mut leader = join(&hub, big, user("l"), Mode::Edit);
-    let mut v = join(&hub, small, user("v"), Mode::Edit);
-    let (start, kept) = (
-        a.hello["saved_seq"].as_u64().expect("saved"),
-        v.hello["saved_seq"].as_u64().expect("saved"),
-    );
-    a.acquire("p", "c1");
-    v.acquire("p", "c1");
-    v.update("p", "v1", "small");
+/// A node budget of 16 000 bytes; each room's remembered ids take 3072 of it, and its fair share
+/// is at least 10 000 (a sixteenth of a 160 000-byte log).
+fn tight(c: &mut LiveConfig) {
+    c.max_total_log_bytes = 16_000;
+    c.max_log_bytes = 160_000;
+    c.max_acked_cids = 64;
+}
+
+/// Two editors in `doc`, the second leading, holding lock `p`.
+fn pair(hub: &Arc<Hub>, doc: Uuid, names: [&str; 2]) -> (Client, Client) {
+    let mut editor = join(hub, doc, user(names[0]), Mode::Edit);
+    let mut leader = join(hub, doc, user(names[1]), Mode::Edit);
+    editor.acquire("p", "lock");
+    editor.drain();
     leader.drain();
+    (editor, leader)
+}
+
+#[test]
+fn the_node_sheds_a_room_above_its_share_and_keeps_its_cids() {
+    let hub = hub(tight);
+    let (big, small) = (Uuid::new_v4(), Uuid::new_v4());
+    let (mut a, mut leader) = pair(&hub, big, ["a", "l"]);
+    let (mut v, _) = pair(&hub, small, ["v", "w"]);
+    let start = a.hello["saved_seq"].as_u64().expect("saved");
+    let kept = v.hello["saved_seq"].as_u64().expect("saved");
+    v.update("p", "v1", "small");
     let payload = "x".repeat(500);
-    for n in 0..40 {
-        a.update("p", &format!("u{n}"), &payload);
+    let first = a.update("p", "u0", &payload)["seq"].clone();
+    for n in 1..40 {
+        assert_eq!(a.update("p", &format!("u{n}"), &payload)["type"], "ack");
     }
     assert_eq!(
         a.replay(start)[0]["code"],
         "REPLAY_GONE",
-        "the largest log shed"
+        "the heavy log shed"
     );
     assert_eq!(leader.all_of("save.request").len(), 1);
     let replayed = v.replay(kept);
     assert_eq!(
         replayed.len(),
         2,
-        "the small room keeps its update: {replayed:?}"
+        "the light room keeps its update: {replayed:?}"
     );
-    assert_eq!(replayed[0]["type"], "region.update");
+
+    leader.drain();
+    let again = a.update("p", "u0", &payload);
+    assert_eq!(again["type"], "ack");
+    assert_eq!(again["seq"], first, "shed from the log, still remembered");
+    assert!(
+        leader.all_of("region.update").is_empty(),
+        "not applied twice"
+    );
+}
+
+#[test]
+fn a_full_node_never_forgets_a_rooms_cids() {
+    let hub = hub(tight);
+    let (many, big) = (Uuid::new_v4(), Uuid::new_v4());
+    let (mut a, mut leader) = pair(&hub, many, ["a", "l"]);
+    let cid = |n: usize| format!("{n:0>128}");
+    let mut last = 0;
+    let first = a.update("p", &cid(0), "x")["seq"].clone();
+    for n in 1..30 {
+        last = a.update("p", &cid(n), "x")["seq"].as_u64().expect("seq");
+    }
+    hub.saved(many, "l", last, 2);
+    let (mut b, _) = pair(&hub, big, ["b", "m"]);
+    assert_eq!(b.update("p", "big", &"y".repeat(6000))["type"], "ack");
+
+    leader.drain();
+    let again = a.update("p", &cid(0), "x");
+    assert_eq!(again["seq"], first, "the room still knows the cid");
+    assert!(
+        leader.all_of("region.update").is_empty(),
+        "not applied twice"
+    );
+}
+
+#[test]
+fn a_heavy_room_waits_rather_than_shed_a_light_one() {
+    let hub = hub(tight);
+    let (big, small) = (Uuid::new_v4(), Uuid::new_v4());
+    let (mut a, mut leader) = pair(&hub, big, ["a", "l"]);
+    let (mut v, _) = pair(&hub, small, ["v", "w"]);
+    let kept = v.hello["saved_seq"].as_u64().expect("saved");
+    let payload = "x".repeat(500);
+    for n in 0..6 {
+        assert_eq!(v.update("p", &format!("v{n}"), &payload)["type"], "ack");
+    }
+    let mut last = 0;
+    let refused = (0..40)
+        .map(|n| a.update("p", &format!("u{n}"), &payload))
+        .find(|answer| {
+            let busy = answer["type"] == "error";
+            if !busy {
+                last = answer["seq"].as_u64().expect("seq");
+            }
+            busy
+        })
+        .expect("refused once the budget is full");
+    assert_eq!(refused["code"], "SERVER_BUSY");
+    let cid = refused["cid"].as_str().expect("cid").to_owned();
+    assert_eq!(v.replay(kept).len(), 7, "the light room keeps every update");
+
+    hub.saved(big, "l", last, 2);
+    leader.drain();
+    assert_eq!(
+        a.update("p", &cid, &payload)["type"],
+        "ack",
+        "sent again after the save"
+    );
 }
 
 #[test]

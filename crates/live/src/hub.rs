@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::{
     ByeReason, Event, LiveConfig, MemberId, Membership, Mode, Participant, PresenceState,
     quota_network,
-    room::{Replay, Room},
+    room::{Replay, Room, Update},
 };
 
 /// Why a connection could not join.
@@ -177,8 +177,21 @@ impl Hub {
         cid: &str,
         payload: &str,
     ) {
-        self.with_room(document, |room, config| {
-            room.update(config, member, region, cid, payload, Instant::now());
+        let mut state = self.lock();
+        let Some(room) = state.rooms.get(&document) else {
+            return;
+        };
+        // The encoded update: payload and region, escaped, plus the envelope.
+        let bytes = payload.len() + region.len() + UPDATE_ENVELOPE_BYTES;
+        let needed = room.log_cost(&self.config, bytes);
+        let room_left = self.make_log_room(&mut state, needed);
+        self.in_room(&mut state, document, |room, config| {
+            let update = Update {
+                region,
+                cid,
+                payload,
+            };
+            room.update(config, member, update, room_left, Instant::now());
         });
     }
 
@@ -244,6 +257,10 @@ impl Hub {
 
     fn with_room(&self, document: Uuid, f: impl FnOnce(&mut Room, &LiveConfig)) {
         let mut state = self.lock();
+        self.in_room(&mut state, document, f);
+    }
+
+    fn in_room(&self, state: &mut State, document: Uuid, f: impl FnOnce(&mut Room, &LiveConfig)) {
         let Some(room) = state.rooms.get_mut(&document) else {
             return;
         };
@@ -252,37 +269,44 @@ impl Hub {
         let after = room.log_memory();
         let removed = room.take_removed();
         state.log_bytes = (state.log_bytes + after).saturating_sub(before);
-        Self::release(&mut state, document, removed);
-        self.keep_log_budget(&mut state);
+        Self::release(state, document, removed);
     }
 
-    /// Sheds the largest logs until all fit in `max_total_log_bytes`, so many full rooms cannot
-    /// exhaust the node's memory; whoever filled them loses replay first.
-    fn keep_log_budget(&self, state: &mut State) {
+    /// Whether `needed` more bytes fit in `max_total_log_bytes`, after shedding the oldest updates
+    /// of the rooms above their fair share (the budget split among open rooms, at least a sixteenth
+    /// of a room's log), evened down from the largest. Rooms within their share keep their logs: a
+    /// heavy room cannot make others lose replay, and when shedding is not enough the update waits.
+    fn make_log_room(&self, state: &mut State, needed: usize) -> bool {
         let budget = self.config.max_total_log_bytes;
-        if state.log_bytes <= budget {
-            return;
+        if state.log_bytes + needed <= budget {
+            return true;
         }
-        // Down to seven eighths, so a busy node does not scan every room on each update.
-        let goal = budget - budget / 8;
-        while state.log_bytes > goal {
-            let largest = state
-                .rooms
-                .iter()
-                .map(|(document, room)| (room.log_memory(), *document))
-                .max();
-            let Some((size, document)) = largest.filter(|(size, _)| *size > 0) else {
+        // A sixteenth below the budget, so a busy node does not shed on every update.
+        let goal = budget.saturating_sub(needed).saturating_sub(budget / 16);
+        let excess = state.log_bytes.saturating_sub(goal);
+        let fair = (budget / state.rooms.len().max(1)).max(self.config.max_log_bytes / 16);
+        let mut heavy: Vec<(usize, Uuid)> = state
+            .rooms
+            .iter()
+            .map(|(document, room)| (room.log_memory(), *document))
+            .filter(|(size, _)| *size > fair)
+            .collect();
+        heavy.sort_unstable_by(|a, b| b.cmp(a));
+        let level = even_level(heavy.iter().map(|(size, _)| *size), excess, fair);
+        for (size, document) in heavy {
+            if size <= level {
                 break;
-            };
+            }
             let Some(room) = state.rooms.get_mut(&document) else {
-                break;
+                continue;
             };
-            room.shed_log(&self.config, size.saturating_sub(state.log_bytes - goal));
+            room.shed_log(&self.config, level);
             let after = room.log_memory();
             let removed = room.take_removed();
             state.log_bytes = (state.log_bytes + after).saturating_sub(size);
             Self::release(state, document, removed);
         }
+        state.log_bytes + needed <= budget
     }
 
     /// Releases the counts of removed members and forgets an empty room.
@@ -315,6 +339,25 @@ impl Hub {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// Bytes of a `region.update` beyond its payload and region (type, seq, author, escaping slack).
+const UPDATE_ENVELOPE_BYTES: usize = 128;
+
+/// The level to cut `sizes` (largest first) down to so that together they lose at least `excess`,
+/// never below `floor`.
+fn even_level(sizes: impl Iterator<Item = usize>, excess: usize, floor: usize) -> usize {
+    let sizes: Vec<usize> = sizes.collect();
+    let mut sum = 0;
+    for (i, size) in sizes.iter().enumerate() {
+        sum += size;
+        let next = sizes.get(i + 1).copied().unwrap_or(floor).max(floor);
+        let count = i + 1;
+        if sum - next * count >= excess {
+            return ((sum - excess) / count).max(floor);
+        }
+    }
+    floor
 }
 
 /// Microseconds since the Unix epoch: a room opened after a restart numbers above anything the

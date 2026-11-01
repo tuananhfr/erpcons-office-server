@@ -3,6 +3,8 @@ use std::{
     sync::Arc,
 };
 
+use sha2::{Digest, Sha256};
+
 /// A room's `region.update`s since the last save, already encoded as their members got them, so a
 /// client that reconnects can catch up. Holds every update with `seq > floor`; the floor rises when
 /// a save makes older ones redundant or when the log outgrows its byte budget.
@@ -12,19 +14,33 @@ pub(crate) struct RoomLog {
     floor: u64,
     saved_seq: u64,
     saved_version: Option<i32>,
-    /// `(actor, cid)` of recent updates and the seq they got, so a resend is acknowledged again
-    /// instead of applied twice; kept past trimming, oldest forgotten first.
-    acked: HashMap<(String, String), u64>,
-    acked_order: VecDeque<(String, String)>,
-    /// Estimated heap bytes of `acked` and `acked_order`.
-    acked_bytes: usize,
+    /// Recent updates' `(actor, cid)` (as [`acked_key`]) and the seq they got, so a resend is
+    /// acknowledged again instead of applied twice; never shed, oldest forgotten past the cap.
+    acked: HashMap<AckedKey, u64>,
+    acked_order: VecDeque<AckedKey>,
+    /// What the node budget charges for `acked` at its cap, from the first update on.
+    reserved: usize,
 }
 
-/// Rough heap cost of one remembered id beyond its strings, which it holds twice.
-const ACKED_OVERHEAD: usize = 96;
+type AckedKey = [u8; 16];
 
-fn acked_cost(key: &(String, String)) -> usize {
-    2 * (key.0.len() + key.1.len()) + ACKED_OVERHEAD
+/// Heap bytes one remembered id may take (map slot, queue slot, table overhead), rounded up.
+const ACKED_ENTRY_BYTES: usize = 48;
+
+/// What a room's remembered ids may take at `max_acked`.
+pub(crate) fn acked_reserve(max_acked: usize) -> usize {
+    max_acked.max(1) * ACKED_ENTRY_BYTES
+}
+
+/// A fixed-size key for `(actor, cid)`; 128 bits of sha256 never collide in practice.
+fn acked_key(actor: &str, cid: &str) -> AckedKey {
+    let mut hash = Sha256::new();
+    hash.update((actor.len() as u64).to_le_bytes());
+    hash.update(actor.as_bytes());
+    hash.update(cid.as_bytes());
+    let mut key = [0u8; 16];
+    key.copy_from_slice(&hash.finalize()[..16]);
+    key
 }
 
 struct Entry {
@@ -50,17 +66,23 @@ impl RoomLog {
             saved_version: None,
             acked: HashMap::new(),
             acked_order: VecDeque::new(),
-            acked_bytes: 0,
+            reserved: 0,
         }
     }
 
-    /// Estimated heap bytes the log holds, for the node's budget.
+    /// What the node budget charges: the kept updates and, once the room took one, its remembered
+    /// ids at their cap.
     pub fn memory(&self) -> usize {
-        self.bytes + self.acked_bytes
+        self.bytes + self.reserved
     }
 
-    /// Drops the oldest updates, then the oldest remembered ids, until at most `target` bytes are
-    /// held; true when updates went.
+    /// Whether the remembered ids are already charged.
+    pub fn charged(&self) -> bool {
+        self.reserved > 0
+    }
+
+    /// Drops the oldest updates until at most `target` bytes are charged or none is left; true
+    /// when updates went. Remembered ids stay, so a resend is never applied twice.
     pub fn shed(&mut self, target: usize) -> bool {
         let mut dropped = false;
         while self.memory() > target {
@@ -70,13 +92,6 @@ impl RoomLog {
             self.bytes -= old.text.len();
             self.floor = old.seq;
             dropped = true;
-        }
-        while self.memory() > target {
-            let Some(old) = self.acked_order.pop_front() else {
-                break;
-            };
-            self.acked.remove(&old);
-            self.acked_bytes -= acked_cost(&old);
         }
         dropped
     }
@@ -90,7 +105,7 @@ impl RoomLog {
     }
 
     pub fn acked(&self, actor: &str, cid: &str) -> Option<u64> {
-        self.acked.get(&(actor.to_owned(), cid.to_owned())).copied()
+        self.acked.get(&acked_key(actor, cid)).copied()
     }
 
     /// Appends an update; true when older ones had to go to stay within `max_bytes`.
@@ -103,17 +118,16 @@ impl RoomLog {
         max_bytes: usize,
         max_acked: usize,
     ) -> bool {
+        self.reserved = acked_reserve(max_acked);
         self.bytes += text.len();
         self.entries.push_back(Entry { seq, text });
-        let key = (actor.to_owned(), cid.to_owned());
-        if self.acked.insert(key.clone(), seq).is_none() {
-            self.acked_bytes += acked_cost(&key);
+        let key = acked_key(actor, cid);
+        if self.acked.insert(key, seq).is_none() {
             self.acked_order.push_back(key);
         }
         while self.acked_order.len() > max_acked.max(1) {
             if let Some(old) = self.acked_order.pop_front() {
                 self.acked.remove(&old);
-                self.acked_bytes -= acked_cost(&old);
             }
         }
         let mut dropped = false;
