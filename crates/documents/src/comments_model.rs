@@ -1,6 +1,7 @@
 //! What the comment operations take and return (plan-m5). No `Debug` on anything holding words,
 //! names or anchors: they are personal data.
 use office_db::comments::{CommentRow, ThreadRow};
+use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -14,8 +15,12 @@ pub const MAX_ANCHOR_BYTES: usize = 8 * 1024;
 pub const MAX_REGION_BYTES: usize = 256;
 /// Threads one document may hold, open, resolved and orphaned together.
 pub const MAX_THREADS_PER_DOCUMENT: i64 = 2_000;
-/// Comments one thread may hold, the first and deleted ones included.
+/// Comments with words one thread may hold, the first included.
 pub const MAX_COMMENTS_PER_THREAD: i64 = 200;
+/// Comments one thread may hold, deleted ones included: deleting must not reopen it forever.
+pub const MAX_COMMENT_ROWS_PER_THREAD: i64 = 1_000;
+/// Bytes of words one document's comments may hold together; bounds what a listing returns.
+pub const MAX_BODY_BYTES_PER_DOCUMENT: i64 = 10 * 1024 * 1024;
 /// Threads one anchor batch may re-place.
 pub const MAX_ANCHOR_CHANGES: usize = 200;
 
@@ -46,14 +51,18 @@ impl ThreadStatus {
     }
 }
 
-/// A comment's words: 1–10 000 characters, not only blanks, no NUL (Postgres refuses it).
+/// A comment's words: 1–10 000 characters, not only blanks, no control characters but line
+/// breaks and tabs (each would cost six bytes as JSON in every listing).
 #[derive(Clone, PartialEq, Eq)]
 pub struct Body(String);
 
 impl Body {
     pub fn parse(raw: String) -> Result<Self, DocError> {
-        let ok =
-            !raw.trim().is_empty() && raw.chars().count() <= MAX_BODY_CHARS && !raw.contains('\0');
+        let ok = !raw.trim().is_empty()
+            && raw.chars().count() <= MAX_BODY_CHARS
+            && !raw
+                .chars()
+                .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'));
         if ok {
             Ok(Self(raw))
         } else {
@@ -66,7 +75,8 @@ impl Body {
     }
 }
 
-/// An anchor as compact JSON text of an object, at most [`MAX_ANCHOR_BYTES`].
+/// An anchor as compact JSON text of an object, at most [`MAX_ANCHOR_BYTES`], whose numbers
+/// Postgres writes back in a few digits.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Anchor(String);
 
@@ -75,6 +85,7 @@ impl Anchor {
         if json_object.starts_with('{')
             && json_object.len() <= MAX_ANCHOR_BYTES
             && !json_object.contains("\\u0000")
+            && serde_json::from_str::<Value>(&json_object).is_ok_and(|v| short_numbers(&v))
         {
             Ok(Self(json_object))
         } else {
@@ -84,6 +95,32 @@ impl Anchor {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// Whether every number prints in a few digits: Postgres stores JSON numbers as decimals and
+/// writes `1e300` back as 301 digits, which would pass the size check here and fail the table's.
+fn short_numbers(value: &Value) -> bool {
+    match value {
+        Value::Number(n) => {
+            n.is_i64()
+                || n.is_u64()
+                || n.as_f64()
+                    .is_some_and(|f| f == 0.0 || (1e-6..=1e15).contains(&f.abs()))
+        }
+        Value::Array(items) => items.iter().all(short_numbers),
+        Value::Object(map) => map.values().all(short_numbers),
+        _ => true,
+    }
+}
+
+/// Whether `adding` bytes of words fit beside the `held` ones of a document.
+pub(crate) fn words_fit(held: i64, adding: usize) -> Result<(), DocError> {
+    let adding = i64::try_from(adding).unwrap_or(i64::MAX);
+    if held.saturating_add(adding) > MAX_BODY_BYTES_PER_DOCUMENT {
+        Err(DocError::TooManyComments)
+    } else {
+        Ok(())
     }
 }
 

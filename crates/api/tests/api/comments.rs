@@ -683,6 +683,10 @@ async fn a_trashed_document_keeps_its_comments_read_only_for_the_owner() {
         .await;
     let listed = ok_json(app.get_as(&cast.path(""), &cast.a).await, 200).await;
     assert_eq!(listed["threads"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        listed["can_resolve"], false,
+        "nothing can change in the trash"
+    );
     expect_error(
         app.get_as(&cast.path(""), &cast.b).await,
         404,
@@ -909,4 +913,168 @@ async fn a_purge_takes_the_threads_with_it() {
         "other documents keep theirs"
     );
     assert_eq!(app.count("SELECT count(*) FROM comments").await, 1);
+}
+
+#[tokio::test]
+async fn control_characters_and_oversized_numbers_are_refused() {
+    let Some(app) = TestApp::spawn().await else {
+        return;
+    };
+    let cast = Cast::new(&app, "escapes").await;
+    let control = json!({ "anchor": {}, "body": "a\u{1}b" });
+    expect_error(
+        start(&app, &cast, &cast.c, &control).await,
+        422,
+        "INVALID_REQUEST",
+        false,
+    )
+    .await;
+    let lines = json!({ "anchor": {}, "body": "dòng 1\r\ndòng 2\tcột" });
+    let thread = ok_json(start(&app, &cast, &cast.c, &lines).await, 201).await;
+    assert_eq!(thread["comments"][0]["body"], "dòng 1\r\ndòng 2\tcột");
+    let tid = id(&thread);
+    let reply = app
+        .post_json(
+            &cast.path(&format!("/{tid}/replies")),
+            &cast.c,
+            &json!({ "body": "x\u{7f}" }),
+        )
+        .await;
+    expect_error(reply, 422, "INVALID_REQUEST", false).await;
+
+    let huge: Value =
+        serde_json::from_str(r#"{"anchor":{"n":[1e300,-1e300]},"body":"ok"}"#).expect("json");
+    expect_error(
+        start(&app, &cast, &cast.c, &huge).await,
+        422,
+        "INVALID_REQUEST",
+        false,
+    )
+    .await;
+    let tiny: Value = serde_json::from_str(r#"{"anchor":{"n":1e-300},"body":"ok"}"#).expect("json");
+    expect_error(
+        start(&app, &cast, &cast.c, &tiny).await,
+        422,
+        "INVALID_REQUEST",
+        false,
+    )
+    .await;
+    let batch: Value = serde_json::from_str(&format!(
+        r#"{{"updates":[{{"thread_id":"{tid}","anchor":{{"n":1e300}}}}]}}"#
+    ))
+    .expect("json");
+    let response = app
+        .send_json(Method::PATCH, &cast.path("/anchors"), &cast.c, &batch)
+        .await;
+    expect_error(response, 422, "INVALID_REQUEST", false).await;
+    let fine: Value = serde_json::from_str(
+        r#"{"anchor":{"offset":12,"big":9007199254740993,"x":0.25,"y":-1500000.5,"z":0},"body":"ok"}"#,
+    )
+    .expect("json");
+    assert_eq!(start(&app, &cast, &cast.c, &fine).await.status(), 201);
+}
+
+#[tokio::test]
+async fn a_document_holds_a_bounded_amount_of_words() {
+    let Some(app) = TestApp::spawn().await else {
+        return;
+    };
+    let cast = Cast::new(&app, "words").await;
+    // 20 000 bytes each; the 525th would pass 10 MiB.
+    let big = "é".repeat(10_000);
+    let mut threads = Vec::new();
+    let mut held = 0;
+    while held < 524 {
+        let body = json!({ "anchor": {}, "body": big });
+        let thread = ok_json(start(&app, &cast, &cast.c, &body).await, 201).await;
+        let tid = id(&thread);
+        threads.push(tid.clone());
+        held += 1;
+        while held < 524 && held % 175 != 0 {
+            reply_ok(&app, &cast, &cast.b, &tid, &big).await;
+            held += 1;
+        }
+    }
+    let tid = &threads[0];
+    let over = app
+        .post_json(
+            &cast.path(&format!("/{tid}/replies")),
+            &cast.b,
+            &json!({ "body": big }),
+        )
+        .await;
+    expect_error(over, 422, "TOO_MANY_COMMENTS", false).await;
+    let small = reply_ok(&app, &cast, &cast.b, tid, "x").await;
+    let grow = app
+        .send_json(
+            Method::PATCH,
+            &cast.path(&format!("/{tid}/comments/{}", id(&small))),
+            &cast.b,
+            &json!({ "body": big }),
+        )
+        .await;
+    expect_error(grow, 422, "TOO_MANY_COMMENTS", false).await;
+    let started = json!({ "anchor": {}, "body": big });
+    expect_error(
+        start(&app, &cast, &cast.a, &started).await,
+        422,
+        "TOO_MANY_COMMENTS",
+        false,
+    )
+    .await;
+
+    let gone = app
+        .request(
+            Method::DELETE,
+            &cast.path(&format!("/{}", threads[1])),
+            &cast.a,
+        )
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(gone.status(), 204);
+    let room = app
+        .post_json(
+            &cast.path(&format!("/{tid}/replies")),
+            &cast.b,
+            &json!({ "body": big }),
+        )
+        .await;
+    assert_eq!(room.status(), 201, "deleting frees room");
+}
+
+#[tokio::test]
+async fn deleted_comments_count_against_a_thread_only_loosely() {
+    let Some(app) = TestApp::spawn().await else {
+        return;
+    };
+    let cast = Cast::new(&app, "deleted").await;
+    let tid = id(&start_ok(&app, &cast, &cast.c).await);
+    let fill = |n: i32| {
+        sqlx::query(
+            "INSERT INTO comments (id, thread_id, author_id, body, deleted_at)
+             SELECT gen_random_uuid(), $1::uuid, 'usr_c', NULL, now() FROM generate_series(1, $2)",
+        )
+        .bind(tid.clone())
+        .bind(n)
+        .execute(app.pool())
+    };
+    fill(199).await.expect("fill");
+    let reply = app
+        .post_json(
+            &cast.path(&format!("/{tid}/replies")),
+            &cast.b,
+            &json!({ "body": "x" }),
+        )
+        .await;
+    assert_eq!(reply.status(), 201, "deleted comments leave room for words");
+    fill(800).await.expect("fill");
+    let full = app
+        .post_json(
+            &cast.path(&format!("/{tid}/replies")),
+            &cast.b,
+            &json!({ "body": "y" }),
+        )
+        .await;
+    expect_error(full, 422, "TOO_MANY_COMMENTS", false).await;
 }

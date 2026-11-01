@@ -11,8 +11,8 @@ use super::{
     comments::thread_of,
 };
 use crate::{
-    Action, Body, Comment, DocError, MAX_COMMENTS_PER_THREAD, MAX_THREADS_PER_DOCUMENT, NewThread,
-    Thread, check_region,
+    Action, Body, Comment, DocError, MAX_COMMENT_ROWS_PER_THREAD, MAX_COMMENTS_PER_THREAD,
+    MAX_THREADS_PER_DOCUMENT, NewThread, Thread, check_region, comments_model::words_fit,
 };
 
 impl Documents {
@@ -50,6 +50,8 @@ impl Documents {
         if held >= MAX_THREADS_PER_DOCUMENT {
             return Err(DocError::TooManyComments);
         }
+        self.check_words(&mut tx, id, new.body.as_str().len())
+            .await?;
         let thread_id = Uuid::now_v7();
         let row = NewThreadRow {
             id: thread_id,
@@ -110,12 +112,13 @@ impl Documents {
         {
             return Err(DocError::NotFound);
         }
-        let held = comments::count_comments(&mut *tx, thread_id)
+        let (rows, live) = comments::count_comments(&mut *tx, thread_id)
             .await
             .map_err(DocError::db)?;
-        if held >= MAX_COMMENTS_PER_THREAD {
+        if live >= MAX_COMMENTS_PER_THREAD || rows >= MAX_COMMENT_ROWS_PER_THREAD {
             return Err(DocError::TooManyComments);
         }
+        self.check_words(&mut tx, id, body.as_str().len()).await?;
         let comment_id = Uuid::now_v7();
         comments::insert_comment(&mut tx, comment_id, thread_id, c.actor_id(), body.as_str())
             .await
@@ -192,6 +195,10 @@ impl Documents {
         }
         let action = match body {
             Some(body) => {
+                let old = row.body.as_deref().map_or(0, str::len);
+                if let Some(growth) = body.as_str().len().checked_sub(old) {
+                    self.check_words(&mut tx, id, growth).await?;
+                }
                 comments::edit(&mut tx, thread_id, comment_id, body.as_str())
                     .await
                     .map_err(DocError::db)?;
@@ -216,6 +223,19 @@ impl Documents {
         tx.commit().await.map_err(DocError::db)?;
         self.live_comments(id, Some(thread_id));
         Ok(())
+    }
+
+    /// Refuses words past the document's bound; the document row is locked, so it holds.
+    async fn check_words(
+        &self,
+        conn: &mut office_db::PgConnection,
+        id: Uuid,
+        adding: usize,
+    ) -> Result<(), DocError> {
+        let held = comments::body_bytes(&mut *conn, id)
+            .await
+            .map_err(DocError::db)?;
+        words_fit(held, adding)
     }
 
     async fn comment_of(

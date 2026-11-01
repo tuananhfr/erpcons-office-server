@@ -3,13 +3,12 @@
 //! The document's owner still reads them in the trash.
 use std::collections::HashMap;
 
-use office_db::{PgExecutor, comments};
+use office_db::{ItemState, PgExecutor, comments};
 use uuid::Uuid;
 
 use super::{Caller, Documents, access};
 use crate::{
-    Action, Comment, DocError, PageRequest, Role, Thread, ThreadStatus, Threads,
-    cursor::ThreadCursor,
+    Action, Comment, DocError, PageRequest, Thread, ThreadStatus, Threads, cursor::ThreadCursor,
 };
 
 impl Documents {
@@ -47,7 +46,9 @@ impl Documents {
         Ok(Threads {
             threads,
             next_cursor,
-            can_resolve: matches!(accessed.role, Role::Owner | Role::Editor),
+            // Writes to a trashed document answer 404 whatever the role says.
+            can_resolve: accessed.row.state == ItemState::Active
+                && accessed.allows(c.actor, Action::ModerateComments).is_ok(),
         })
     }
 

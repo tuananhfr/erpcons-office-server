@@ -5,7 +5,8 @@ CREATE TABLE comment_threads (
     id                   UUID PRIMARY KEY,
     document_id          UUID NOT NULL REFERENCES documents (id),
     -- Where the editor placed it: region id, position in it and a soft anchor. Opaque to the server.
-    anchor               JSONB NOT NULL CHECK (jsonb_typeof(anchor) = 'object' AND octet_length(anchor::text) <= 16384),
+    -- The server takes 8 KiB of compact JSON; Postgres writes it back with spaces and longer numbers.
+    anchor               JSONB NOT NULL CHECK (jsonb_typeof(anchor) = 'object' AND octet_length(anchor::text) <= 65536),
     -- The stable region id of the anchor, when it has one (plan-m3).
     region               TEXT CHECK (octet_length(region) BETWEEN 1 AND 256),
     -- The version the anchor was taken on.
@@ -17,6 +18,8 @@ CREATE TABLE comment_threads (
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     resolved_by          TEXT REFERENCES actors (id),
     resolved_at          TIMESTAMPTZ,
+    -- Bytes of the words still in its comments, for the per-document bound.
+    body_bytes           BIGINT NOT NULL DEFAULT 0 CHECK (body_bytes >= 0),
     CHECK ((status = 'resolved') = (resolved_at IS NOT NULL)),
     CHECK ((resolved_by IS NULL) = (resolved_at IS NULL))
 );

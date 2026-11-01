@@ -21,7 +21,8 @@ mod templates;
 
 pub use authorize::{Action, Denied, Resource, Role, authorize};
 pub use comments_model::{
-    Anchor, AnchorChange, Body, Comment, MAX_ANCHOR_BYTES, MAX_ANCHOR_CHANGES, MAX_BODY_CHARS,
+    Anchor, AnchorChange, Body, Comment, MAX_ANCHOR_BYTES, MAX_ANCHOR_CHANGES,
+    MAX_BODY_BYTES_PER_DOCUMENT, MAX_BODY_CHARS, MAX_COMMENT_ROWS_PER_THREAD,
     MAX_COMMENTS_PER_THREAD, MAX_REGION_BYTES, MAX_THREADS_PER_DOCUMENT, NewThread, Thread,
     ThreadStatus, Threads, check_region,
 };

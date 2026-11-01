@@ -63,8 +63,11 @@ pub async fn insert_thread(
     thread: &NewThread<'_>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO comment_threads (id, document_id, anchor, region, created_version_seq, created_by)
-         VALUES ($1, $2, $3::jsonb, $4, $5, $6)",
+        // The clock, not the transaction start: writers queue on the document row, and the batched
+        // mail counts threads created after the first one by this time.
+        "INSERT INTO comment_threads
+             (id, document_id, anchor, region, created_version_seq, created_by, created_at, updated_at)
+         VALUES ($1, $2, $3::jsonb, $4, $5, $6, clock_timestamp(), clock_timestamp())",
     )
     .bind(thread.id)
     .bind(thread.document_id)
@@ -94,9 +97,13 @@ pub async fn insert_comment(
     touch(conn, thread_id).await
 }
 
-/// The thread's `updated_at`: any change to it or its comments.
+/// The thread's `updated_at` and `body_bytes`: any change to it or its comments.
 async fn touch(conn: &mut PgConnection, thread_id: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE comment_threads SET updated_at = now() WHERE id = $1")
+    sqlx::query(
+        "UPDATE comment_threads SET updated_at = now(),
+             body_bytes = (SELECT COALESCE(sum(octet_length(body)), 0) FROM comments WHERE thread_id = $1)
+         WHERE id = $1",
+    )
         .bind(thread_id)
         .execute(conn)
         .await
@@ -185,11 +192,27 @@ pub async fn count_threads(db: impl PgExecutor<'_>, document_id: Uuid) -> Result
         .await
 }
 
-pub async fn count_comments(db: impl PgExecutor<'_>, thread_id: Uuid) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar("SELECT count(*) FROM comments WHERE thread_id = $1")
-        .bind(thread_id)
-        .fetch_one(db)
-        .await
+/// Comments of the thread: all of them, and those still holding words.
+pub async fn count_comments(
+    db: impl PgExecutor<'_>,
+    thread_id: Uuid,
+) -> Result<(i64, i64), sqlx::Error> {
+    sqlx::query_as(
+        "SELECT count(*), count(*) FILTER (WHERE deleted_at IS NULL) FROM comments WHERE thread_id = $1",
+    )
+    .bind(thread_id)
+    .fetch_one(db)
+    .await
+}
+
+/// Bytes of words held by the comments of `document_id`.
+pub async fn body_bytes(db: impl PgExecutor<'_>, document_id: Uuid) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT COALESCE(sum(body_bytes), 0)::bigint FROM comment_threads WHERE document_id = $1",
+    )
+    .bind(document_id)
+    .fetch_one(db)
+    .await
 }
 
 /// Replaces the body of a comment not deleted; `false` when there is none.

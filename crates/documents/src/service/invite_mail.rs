@@ -56,9 +56,15 @@ impl Documents {
             if allowance == 0 {
                 break;
             }
-            let received = mail_outbox::received_since(&mut *conn, email.as_str(), WINDOW_SECS)
-                .await
-                .map_err(DocError::db)?;
+            // Invitations only: comment mails must not use up someone's invitations.
+            let received = mail_outbox::received_of_kinds_since(
+                &mut *conn,
+                email.as_str(),
+                &[KIND_SHARED],
+                WINDOW_SECS,
+            )
+            .await
+            .map_err(DocError::db)?;
             if remaining(PER_RECIPIENT_DAILY_CAP, received) == 0 {
                 continue;
             }

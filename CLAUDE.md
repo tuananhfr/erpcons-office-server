@@ -40,8 +40,8 @@ is `docs/openapi.yaml`. The approved plans are `erpcons-workspace/tmp/briefs/off
   when no live version uses it, and the request deletes the bytes after the commit, else the purge job does. The
   comment in migration 0001 ("only a purge may delete them") predates this.
 - **Lock order** in a transaction: actor row (the document owner's), then `locks::tree` (owner), then
-  `locks::object` (sha256), then document rows, then `locks::recipients` (the sharer's new-address cap), then
-  `locks::mail_caps` (the invite mail caps). A mutation writes its
+  `locks::object` (sha256), then document rows, then a `comment_threads` row, then `locks::recipients` (the
+  sharer's new-address cap), then `locks::mail_caps` (the invite and comment mail caps). A mutation writes its
   audit row inside its own transaction.
 - **Live rooms** (`crates/live`, `crates/api/src/live/`): in memory, one node. A PI token never goes in a URL: the
   WebSocket opens with a one-time ticket (sha256 only, 30 s, bound to document and client address). Membership is

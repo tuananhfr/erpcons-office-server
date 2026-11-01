@@ -18,6 +18,8 @@ use crate::{Action, DocError, Resource, Role, authorize};
 
 /// New threads of one document wait this long for the others that follow.
 const THREADS_BATCH_SECS: i64 = 15 * 60;
+/// A reply mail waits this long, so a quick exchange makes one mail per person, not one each.
+const REPLY_BATCH_SECS: i64 = 2 * 60;
 /// Comment mails one address receives per rolling day, from all documents together.
 const COMMENT_MAILS_PER_RECIPIENT: u32 = 50;
 const COMMENT_KINDS: [&str; 2] = [KIND_COMMENT_REPLY, KIND_COMMENT_THREADS];
@@ -158,7 +160,7 @@ impl Documents {
                 to_email: email,
                 payload: &notice.to_json(),
             };
-            mail_outbox::enqueue(conn, &mail)
+            mail_outbox::enqueue_in(conn, &mail, REPLY_BATCH_SECS)
                 .await
                 .map_err(DocError::db)?;
         }

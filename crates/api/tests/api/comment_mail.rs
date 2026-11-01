@@ -282,3 +282,64 @@ async fn people_who_lost_access_get_no_comment_mail() {
     let report = send_all(&app, &transport).await;
     assert_eq!((report.sent, report.dropped), (0, 1));
 }
+
+#[tokio::test]
+async fn replies_close_together_share_one_mail() {
+    let Some(app) = spawn(false).await else {
+        return;
+    };
+    let cast = Cast::new(&app, TITLE).await;
+    let tid = id(&start_ok(&app, &cast, &cast.c).await);
+    reply_ok(&app, &cast, &cast.b, &tid, "một").await;
+    let transport = Recorder::default();
+    let sources = MailSources {
+        signups: None,
+        comments: Some(&**app.documents()),
+    };
+    let report = run_outbox(
+        app.pool(),
+        &transport,
+        ORIGIN,
+        sources,
+        &OutboxConfig::default(),
+    )
+    .await
+    .expect("outbox");
+    assert_eq!(
+        report.sent, 0,
+        "a reply mail waits for the replies that follow"
+    );
+    reply_ok(&app, &cast, &cast.b, &tid, "hai").await;
+    reply_ok(&app, &cast, &cast.b, &tid, "ba").await;
+    let to_c = app
+        .count("SELECT count(*) FROM mail_outbox WHERE kind = 'comment_reply'")
+        .await;
+    assert_eq!(to_c, 1);
+}
+
+#[tokio::test]
+async fn comment_mails_leave_invitations_their_own_cap() {
+    let Some(app) = spawn(false).await else {
+        return;
+    };
+    let cast = Cast::new(&app, TITLE).await;
+    sqlx::query(
+        "INSERT INTO mail_outbox (id, kind, to_email, payload)
+         SELECT gen_random_uuid(), 'comment_reply', 'victim@erpcons.test', '{}' FROM generate_series(1, 10)",
+    )
+    .execute(app.pool())
+    .await
+    .expect("comment mails");
+    let response = app
+        .send_json(
+            Method::POST,
+            &format!("/api/v1/documents/{}/permissions", cast.doc),
+            &cast.a,
+            &json!({ "emails": ["victim@erpcons.test"], "role": "viewer", "notify": true }),
+        )
+        .await;
+    assert_eq!(
+        crate::support::ok_json(response, 200).await["mail_skipped"],
+        0
+    );
+}
