@@ -147,8 +147,8 @@ impl Room {
         self.settle(config);
     }
 
-    /// Relays a cursor to everyone else, best effort: a member whose queue is full misses it
-    /// rather than being dropped for it. Never logged.
+    /// Relays a cursor to everyone else, best effort: a member whose queue is half full misses it,
+    /// so cursors never crowd out what must arrive. Never logged.
     pub fn cursor(&mut self, config: &LiveConfig, id: MemberId, region: &str, range: &str) {
         let Some(member) = self.members.get(&id) else {
             return;
@@ -161,7 +161,7 @@ impl Room {
         let text: Arc<str> = protocol::cursor(id, region, range).into();
         let mut gone = Vec::new();
         for (other, member) in &self.members {
-            if *other == id {
+            if *other == id || member.sender.capacity() <= config.outbox / 2 {
                 continue;
             }
             if let Err(TrySendError::Closed(_)) = member.sender.try_send(Event::Send(text.clone()))
@@ -204,10 +204,28 @@ impl Room {
         if !leads || !self.log.saved(live_seq, version, self.seq) {
             return;
         }
-        // A later overflow asks again.
-        self.save_requested = false;
         let text: Arc<str> = protocol::saved(self.log.saved_seq(), version).into();
         self.broadcast(&text, None);
+        // A save older than the trimmed log leaves newcomers unable to replay: ask again.
+        self.save_requested = self.log.short();
+        if self.save_requested {
+            self.request_save();
+        }
+        self.settle(config);
+    }
+
+    /// Estimated heap bytes of the room's log, for the node's budget.
+    pub fn log_memory(&self) -> usize {
+        self.log.memory()
+    }
+
+    /// Sheds the log to at most `target` bytes for the node's budget; the leader is asked to save
+    /// when updates went, since newcomers can no longer replay them.
+    pub fn shed_log(&mut self, config: &LiveConfig, target: usize) {
+        if self.log.shed(target) && !self.save_requested {
+            self.save_requested = true;
+            self.request_save();
+        }
         self.settle(config);
     }
 

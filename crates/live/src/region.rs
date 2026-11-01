@@ -8,9 +8,16 @@ pub const WHOLE: &str = "*";
 /// Longest region id, in bytes.
 pub const MAX_REGION_BYTES: usize = 256;
 
-/// A region id a client may name: 1 to 256 bytes, no control characters.
+/// A region id a client may name: 1 to 256 bytes, no control characters, and a sheet id that is
+/// not empty and holds no `:` (else `sheet:a` and `sheet:a:b` would both cover `cell:a:b:A1`).
 pub fn valid(region: &str) -> bool {
-    !region.is_empty() && region.len() <= MAX_REGION_BYTES && !region.chars().any(char::is_control)
+    let sheet_ok = region
+        .strip_prefix("sheet:")
+        .is_none_or(|id| !id.is_empty() && !id.contains(':'));
+    !region.is_empty()
+        && region.len() <= MAX_REGION_BYTES
+        && !region.chars().any(char::is_control)
+        && sheet_ok
 }
 
 /// Whether locks on `a` and `b` held by two different members would clash: the same region, `*`
@@ -27,8 +34,7 @@ pub fn covers(outer: &str, inner: &str) -> bool {
     outer == inner || outer == WHOLE || contains(outer, inner)
 }
 
-/// `sheet:<id>` contains `cell:<id>:<anything>`. A sheet id holding `:` may over-match; that only
-/// ever refuses a lock, never grants a second one.
+/// `sheet:<id>` contains `cell:<id>:<anything>`.
 fn contains(order: &str, child: &str) -> bool {
     let Some(sheet) = order.strip_prefix("sheet:") else {
         return false;
@@ -51,6 +57,9 @@ mod tests {
         assert!(!valid(""));
         assert!(!valid(&"x".repeat(MAX_REGION_BYTES + 1)));
         assert!(!valid("para:1\n"));
+        assert!(valid("sheet:s1"));
+        assert!(!valid("sheet:"), "no sheet");
+        assert!(!valid("sheet:a:b"), "would nest inside sheet:a");
     }
 
     #[test]

@@ -38,6 +38,8 @@ struct State {
     next_member: u64,
     /// The highest seq of a room that is gone; a new room numbers above it.
     retired_seq: u64,
+    /// Sum of the rooms' log memory (`Room::log_memory`).
+    log_bytes: usize,
 }
 
 pub struct Hub {
@@ -245,9 +247,42 @@ impl Hub {
         let Some(room) = state.rooms.get_mut(&document) else {
             return;
         };
+        let before = room.log_memory();
         f(room, &self.config);
+        let after = room.log_memory();
         let removed = room.take_removed();
+        state.log_bytes = (state.log_bytes + after).saturating_sub(before);
         Self::release(&mut state, document, removed);
+        self.keep_log_budget(&mut state);
+    }
+
+    /// Sheds the largest logs until all fit in `max_total_log_bytes`, so many full rooms cannot
+    /// exhaust the node's memory; whoever filled them loses replay first.
+    fn keep_log_budget(&self, state: &mut State) {
+        let budget = self.config.max_total_log_bytes;
+        if state.log_bytes <= budget {
+            return;
+        }
+        // Down to seven eighths, so a busy node does not scan every room on each update.
+        let goal = budget - budget / 8;
+        while state.log_bytes > goal {
+            let largest = state
+                .rooms
+                .iter()
+                .map(|(document, room)| (room.log_memory(), *document))
+                .max();
+            let Some((size, document)) = largest.filter(|(size, _)| *size > 0) else {
+                break;
+            };
+            let Some(room) = state.rooms.get_mut(&document) else {
+                break;
+            };
+            room.shed_log(&self.config, size.saturating_sub(state.log_bytes - goal));
+            let after = room.log_memory();
+            let removed = room.take_removed();
+            state.log_bytes = (state.log_bytes + after).saturating_sub(size);
+            Self::release(state, document, removed);
+        }
     }
 
     /// Releases the counts of removed members and forgets an empty room.
@@ -272,6 +307,7 @@ impl Hub {
         if state.rooms.get(&document).is_some_and(Room::is_empty)
             && let Some(room) = state.rooms.remove(&document)
         {
+            state.log_bytes = state.log_bytes.saturating_sub(room.log_memory());
             state.retired_seq = state.retired_seq.max(room.seq());
         }
     }

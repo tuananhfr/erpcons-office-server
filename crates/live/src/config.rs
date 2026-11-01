@@ -40,6 +40,9 @@ pub struct LiveConfig {
     pub max_log_bytes: usize,
     /// Client message ids a room remembers, so a resent update is acknowledged, not applied twice.
     pub max_acked_cids: usize,
+    /// What all rooms' logs and remembered ids may take on the node; past it the largest logs
+    /// shed their oldest updates and their leaders are asked to save.
+    pub max_total_log_bytes: usize,
     /// Messages a connection may send at once, then refilled at `messages_per_second`.
     pub message_burst: u32,
     pub messages_per_second: f64,
@@ -84,6 +87,7 @@ impl Default for LiveConfig {
             max_locks_per_member: 64,
             max_log_bytes: 8 * 1024 * 1024,
             max_acked_cids: 4096,
+            max_total_log_bytes: 256 * 1024 * 1024,
             message_burst: 20,
             messages_per_second: 10.0,
             max_per_document: 50,

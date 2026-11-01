@@ -170,12 +170,14 @@ impl ServerConfig {
                     "ERPCONS_LIVE_MAX_CONNECTIONS",
                     defaults.live.max_connections,
                 )?,
-                max_region_message_bytes: vars.positive(
-                    "ERPCONS_LIVE_MAX_REGION_BYTES",
-                    defaults.live.max_region_message_bytes,
-                )?,
+                max_region_message_bytes: vars
+                    .region_bytes(defaults.live.region_bytes_burst as usize)?,
                 max_log_bytes: vars
                     .positive("ERPCONS_LIVE_MAX_LOG_BYTES", defaults.live.max_log_bytes)?,
+                max_total_log_bytes: vars.positive(
+                    "ERPCONS_LIVE_MAX_TOTAL_LOG_BYTES",
+                    defaults.live.max_total_log_bytes,
+                )?,
                 ..defaults.live.clone()
             },
         };
@@ -321,6 +323,15 @@ impl<F: Fn(&str) -> Option<String>> Vars<F> {
                 office_mail::DEFAULT_GLOBAL_DAILY_CAP,
             )?,
         }))
+    }
+
+    /// The largest `region.update`; above the region byte burst no such update could ever pass.
+    fn region_bytes(&self, burst: usize) -> Result<usize, ConfigError> {
+        const NAME: &str = "ERPCONS_LIVE_MAX_REGION_BYTES";
+        match self.positive(NAME, LiveConfig::default().max_region_message_bytes)? {
+            n if n > burst => Err(ConfigError::Invalid(NAME)),
+            n => Ok(n),
+        }
     }
 
     fn positive(&self, name: &'static str, default: usize) -> Result<usize, ConfigError> {
@@ -550,12 +561,14 @@ mod tests {
             ("ERPCONS_LIVE_MAX_CONNECTIONS", "70"),
             ("ERPCONS_LIVE_MAX_REGION_BYTES", "65536"),
             ("ERPCONS_LIVE_MAX_LOG_BYTES", "1048576"),
+            ("ERPCONS_LIVE_MAX_TOTAL_LOG_BYTES", "33554432"),
         ])
         .expect("config");
         assert_eq!(c.api.live.max_per_address, 7);
         assert_eq!(c.api.live.max_connections, 70);
         assert_eq!(c.api.live.max_region_message_bytes, 65536);
         assert_eq!(c.api.live.max_log_bytes, 1048576);
+        assert_eq!(c.api.live.max_total_log_bytes, 33554432);
         assert_eq!(c.api.live.max_editors, 10);
         assert_eq!(c.bind.port(), 8710);
         assert!(c.bind.ip().is_unspecified());
@@ -658,6 +671,8 @@ mod tests {
             ("ERPCONS_LIVE_MAX_CONNECTIONS", "x"),
             ("ERPCONS_LIVE_MAX_REGION_BYTES", "0"),
             ("ERPCONS_LIVE_MAX_LOG_BYTES", "-1"),
+            ("ERPCONS_LIVE_MAX_TOTAL_LOG_BYTES", "0"),
+            ("ERPCONS_LIVE_MAX_REGION_BYTES", "4194305"),
         ] {
             assert_eq!(
                 load(&[bad]).err(),

@@ -16,6 +16,15 @@ pub(crate) struct RoomLog {
     /// instead of applied twice; kept past trimming, oldest forgotten first.
     acked: HashMap<(String, String), u64>,
     acked_order: VecDeque<(String, String)>,
+    /// Estimated heap bytes of `acked` and `acked_order`.
+    acked_bytes: usize,
+}
+
+/// Rough heap cost of one remembered id beyond its strings, which it holds twice.
+const ACKED_OVERHEAD: usize = 96;
+
+fn acked_cost(key: &(String, String)) -> usize {
+    2 * (key.0.len() + key.1.len()) + ACKED_OVERHEAD
 }
 
 struct Entry {
@@ -41,7 +50,35 @@ impl RoomLog {
             saved_version: None,
             acked: HashMap::new(),
             acked_order: VecDeque::new(),
+            acked_bytes: 0,
         }
+    }
+
+    /// Estimated heap bytes the log holds, for the node's budget.
+    pub fn memory(&self) -> usize {
+        self.bytes + self.acked_bytes
+    }
+
+    /// Drops the oldest updates, then the oldest remembered ids, until at most `target` bytes are
+    /// held; true when updates went.
+    pub fn shed(&mut self, target: usize) -> bool {
+        let mut dropped = false;
+        while self.memory() > target {
+            let Some(old) = self.entries.pop_front() else {
+                break;
+            };
+            self.bytes -= old.text.len();
+            self.floor = old.seq;
+            dropped = true;
+        }
+        while self.memory() > target {
+            let Some(old) = self.acked_order.pop_front() else {
+                break;
+            };
+            self.acked.remove(&old);
+            self.acked_bytes -= acked_cost(&old);
+        }
+        dropped
     }
 
     pub fn saved_seq(&self) -> u64 {
@@ -70,11 +107,13 @@ impl RoomLog {
         self.entries.push_back(Entry { seq, text });
         let key = (actor.to_owned(), cid.to_owned());
         if self.acked.insert(key.clone(), seq).is_none() {
+            self.acked_bytes += acked_cost(&key);
             self.acked_order.push_back(key);
         }
         while self.acked_order.len() > max_acked.max(1) {
             if let Some(old) = self.acked_order.pop_front() {
                 self.acked.remove(&old);
+                self.acked_bytes -= acked_cost(&old);
             }
         }
         let mut dropped = false;
@@ -121,7 +160,6 @@ impl RoomLog {
     }
 
     /// Updates after the last save are no longer all here.
-    #[cfg(test)]
     pub fn short(&self) -> bool {
         self.floor > self.saved_seq
     }

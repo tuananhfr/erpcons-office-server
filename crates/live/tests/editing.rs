@@ -494,6 +494,64 @@ fn a_full_log_asks_the_leader_to_save_and_a_save_trims_it() {
 }
 
 #[test]
+fn a_save_older_than_the_log_asks_again() {
+    let hub = hub(|c| c.max_log_bytes = 300);
+    let doc = Uuid::new_v4();
+    let mut a = join(&hub, doc, user("a"), Mode::Edit);
+    let mut b = join(&hub, doc, user("b"), Mode::Edit);
+    a.acquire("p", "c1");
+    a.drain();
+    b.drain();
+    let payload = "x".repeat(100);
+    let first = a.update("p", "u0", &payload)["seq"].as_u64().expect("seq");
+    for n in 1..6 {
+        a.update("p", &format!("u{n}"), &payload);
+    }
+    assert_eq!(b.all_of("save.request").len(), 1);
+    hub.saved(doc, "b", first, 3);
+    assert_eq!(a.next_of("saved")["saved_seq"], first);
+    assert_eq!(
+        b.all_of("save.request").len(),
+        1,
+        "what follows the save is no longer all logged"
+    );
+}
+
+#[test]
+fn the_node_sheds_the_largest_logs_first() {
+    let hub = hub(|c| c.max_total_log_bytes = 8000);
+    let (big, small) = (Uuid::new_v4(), Uuid::new_v4());
+    let mut a = join(&hub, big, user("a"), Mode::Edit);
+    let mut leader = join(&hub, big, user("l"), Mode::Edit);
+    let mut v = join(&hub, small, user("v"), Mode::Edit);
+    let (start, kept) = (
+        a.hello["saved_seq"].as_u64().expect("saved"),
+        v.hello["saved_seq"].as_u64().expect("saved"),
+    );
+    a.acquire("p", "c1");
+    v.acquire("p", "c1");
+    v.update("p", "v1", "small");
+    leader.drain();
+    let payload = "x".repeat(500);
+    for n in 0..40 {
+        a.update("p", &format!("u{n}"), &payload);
+    }
+    assert_eq!(
+        a.replay(start)[0]["code"],
+        "REPLAY_GONE",
+        "the largest log shed"
+    );
+    assert_eq!(leader.all_of("save.request").len(), 1);
+    let replayed = v.replay(kept);
+    assert_eq!(
+        replayed.len(),
+        2,
+        "the small room keeps its update: {replayed:?}"
+    );
+    assert_eq!(replayed[0]["type"], "region.update");
+}
+
+#[test]
 fn a_new_leader_is_asked_to_save_when_the_old_one_was() {
     let hub = hub(|c| c.max_log_bytes = 100);
     let doc = Uuid::new_v4();
@@ -563,6 +621,36 @@ fn cursors_reach_the_others_and_are_never_logged() {
         a.membership.cursor("para:1", &n.to_string());
     }
     assert_eq!(hub.members_of(doc), 3);
+}
+
+#[test]
+fn cursors_leave_room_for_what_must_arrive() {
+    let hub = hub(|c| c.outbox = 8);
+    let doc = Uuid::new_v4();
+    let mut a = join(&hub, doc, user("a"), Mode::Edit);
+    let mut b = join(&hub, doc, user("b"), Mode::Edit);
+    a.drain();
+    b.drain();
+    for n in 0..20 {
+        a.membership.cursor("para:1", &n.to_string());
+    }
+    let granted = a.acquire("p", "c1");
+    assert_eq!(granted["type"], "lock.granted");
+    assert_eq!(
+        hub.members_of(doc),
+        2,
+        "b, slow with cursors, is not dropped"
+    );
+    let mut cursors = 0;
+    loop {
+        let message = b.next();
+        if message["type"] == "locks" {
+            break;
+        }
+        assert_eq!(message["type"], "cursor");
+        cursors += 1;
+    }
+    assert!(cursors <= 4, "at most half the queue: {cursors}");
 }
 
 #[test]
