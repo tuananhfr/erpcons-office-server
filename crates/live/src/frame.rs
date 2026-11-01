@@ -14,6 +14,9 @@ use crate::{
 #[derive(Clone)]
 pub struct Frame(Inner);
 
+/// JSON around one lock table entry (holder id, colour, quotes, escapes), rounded up.
+const LOCK_ENTRY_OVERHEAD: usize = 96;
+
 #[derive(Clone)]
 enum Inner {
     Text(Arc<str>),
@@ -76,6 +79,20 @@ impl Frame {
                 text
             }
             Inner::Locks(snapshot) => snapshot.text().to_owned(),
+        }
+    }
+
+    /// What the frame weighs in a member's queue: its bytes, or for a lock table (serialized
+    /// later, outside the hub lock) an upper estimate from its entries.
+    pub(crate) fn weight(&self) -> usize {
+        match &self.0 {
+            Inner::Locks(snapshot) => snapshot
+                .entries
+                .iter()
+                .map(|(region, _, _)| region.len() + LOCK_ENTRY_OVERHEAD)
+                .sum::<usize>()
+                .saturating_add(LOCK_ENTRY_OVERHEAD),
+            _ => self.len(),
         }
     }
 

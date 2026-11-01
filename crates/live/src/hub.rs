@@ -4,7 +4,7 @@
 use std::{
     collections::HashMap,
     net::IpAddr,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{Arc, Mutex, MutexGuard, PoisonError, atomic::AtomicUsize},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -13,8 +13,9 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    ByeReason, Event, LiveConfig, MemberId, Membership, Mode, Participant, PresenceState, protocol,
-    quota_network,
+    ByeReason, Event, LiveConfig, MemberId, Membership, Mode, Participant, PresenceState,
+    member::Outbox,
+    protocol, quota_network,
     room::{Replay, Room, Update},
 };
 
@@ -105,7 +106,13 @@ impl Hub {
             return Err(JoinRefused::RoomFull);
         }
         let (sender, receiver) = mpsc::channel(self.config.outbox.max(1));
-        room.add(&self.config, id, participant, allowed, address, sender);
+        let backlog = Arc::new(AtomicUsize::new(0));
+        let outbox = Outbox {
+            sender,
+            backlog: backlog.clone(),
+            cap: self.config.backlog_cap(),
+        };
+        room.add(&self.config, id, participant, allowed, address, outbox);
         let removed = room.take_removed();
         state.total += 1;
         *state.per_address.entry(address).or_insert(0) += 1;
@@ -113,7 +120,10 @@ impl Hub {
             *state.per_actor.entry(actor).or_insert(0) += 1;
         }
         Self::release(&mut state, document, removed);
-        Ok((Membership::new(self.clone(), document, id), receiver))
+        Ok((
+            Membership::new(self.clone(), document, id, backlog),
+            receiver,
+        ))
     }
 
     pub(crate) fn leave(&self, document: Uuid, member: MemberId) {

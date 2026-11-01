@@ -6,13 +6,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tokio::sync::mpsc::error::TrySendError;
-
 use super::Room;
 use crate::{
     Event, Frame, LiveConfig, MemberId, Mode,
     locks::Refusal,
     log::{Origin, acked_reserve},
+    member::Offer,
     protocol::{self, LiveErrorCode},
 };
 
@@ -214,11 +213,10 @@ impl Room {
         let text = Frame::from(protocol::cursor(id, region, range));
         let mut gone = Vec::new();
         for (other, member) in &self.members {
-            if *other == id || member.sender.capacity() <= config.outbox / 2 {
+            if *other == id || !member.outbox.roomy(config.outbox) {
                 continue;
             }
-            if let Err(TrySendError::Closed(_)) = member.sender.try_send(Event::Send(text.clone()))
-            {
+            if let Offer::Closed = member.outbox.offer(Event::Send(text.clone())) {
                 gone.push(*other);
             }
         }

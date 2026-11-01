@@ -67,6 +67,9 @@ pub struct LiveConfig {
     pub recheck_interval: Duration,
     /// Events queued for one connection; a client that falls this far behind is dropped.
     pub outbox: usize,
+    /// Bytes of messages a member may have queued and not yet written (a replay's held ones
+    /// included), at least four region updates; past it the member is dropped like a full queue.
+    pub max_backlog_bytes: usize,
 }
 
 impl Default for LiveConfig {
@@ -105,11 +108,18 @@ impl Default for LiveConfig {
             idle_timeout: Duration::from_secs(30),
             recheck_interval: Duration::from_secs(60),
             outbox: 64,
+            max_backlog_bytes: 16 * 1024 * 1024,
         }
     }
 }
 
 impl LiveConfig {
+    /// What a member's queue may hold in bytes.
+    pub fn backlog_cap(&self) -> usize {
+        self.max_backlog_bytes
+            .max(self.max_region_message_bytes.saturating_mul(4))
+    }
+
     /// Largest message a connection that joined with `allowed` takes: only a would-be editor may
     /// send `region.update`, so nobody else gets frames that large.
     pub fn frame_limit(&self, allowed: Mode) -> usize {

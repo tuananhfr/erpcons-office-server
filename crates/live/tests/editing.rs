@@ -54,7 +54,10 @@ fn join_unsynced(hub: &Arc<Hub>, doc: Uuid, who: Participant, allowed: Mode) -> 
 impl Client {
     fn next(&mut self) -> Value {
         match self.events.try_recv().expect("an event") {
-            Event::Send(text) => serde_json::from_str(&text.to_text()).expect("json"),
+            Event::Send(text) => {
+                self.membership.written(&text);
+                serde_json::from_str(&text.to_text()).expect("json")
+            }
             Event::Close(reason) => panic!("closed: {reason:?}"),
             Event::Recheck => panic!("recheck"),
         }
@@ -73,6 +76,7 @@ impl Client {
     fn all_of(&mut self, kind: &str) -> Vec<Value> {
         let mut found = Vec::new();
         while let Ok(Event::Send(text)) = self.events.try_recv() {
+            self.membership.written(&text);
             let message: Value = serde_json::from_str(&text.to_text()).expect("json");
             if message["type"] == kind {
                 found.push(message);
@@ -82,7 +86,11 @@ impl Client {
     }
 
     fn drain(&mut self) {
-        while self.events.try_recv().is_ok() {}
+        while let Ok(event) = self.events.try_recv() {
+            if let Event::Send(text) = event {
+                self.membership.written(&text);
+            }
+        }
     }
 
     fn idle(&mut self) -> bool {
@@ -939,4 +947,21 @@ fn a_room_that_drops_unsaved_cids_asks_for_a_save() {
         "region.replayed"
     );
     assert!(leader.all_of("save.request").is_empty(), "not asked again");
+}
+
+#[test]
+fn a_member_that_falls_megabytes_behind_is_dropped() {
+    let hub = hub(|_| {});
+    let doc = Uuid::new_v4();
+    let (mut a, mut leader) = pair(&hub, doc, ["a", "l"]);
+    // Never reads its queue: 20 updates of a MiB are far fewer than 64 events.
+    let _slow = join(&hub, doc, user("s"), Mode::View);
+    a.drain();
+    leader.drain();
+    let payload = "x".repeat(1024 * 1024);
+    for n in 0..20 {
+        assert_eq!(a.update("p", &format!("u{n}"), &payload)["type"], "ack");
+        leader.drain();
+    }
+    assert_eq!(hub.members_of(doc), 2, "dropped past 16 MiB behind");
 }

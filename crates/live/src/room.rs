@@ -9,7 +9,6 @@ use std::{collections::BTreeMap, net::IpAddr, time::Instant};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::hmac;
-use tokio::sync::mpsc::{self, error::TrySendError};
 use uuid::Uuid;
 
 pub(crate) use editing::{Replay, Update};
@@ -19,7 +18,7 @@ use crate::{
     PresenceState,
     frame::LocksSnapshot,
     log::{Acked, RoomLog, actor_tag},
-    member::Member,
+    member::{Member, Offer, Outbox},
     palette,
     protocol::{self, Hello, Limits, MemberView},
 };
@@ -105,7 +104,7 @@ impl Room {
         participant: Participant,
         allowed: Mode,
         address: Option<IpAddr>,
-        sender: mpsc::Sender<Event>,
+        outbox: Outbox,
     ) {
         let colour = palette::pick(self.members.values().map(|m| m.colour));
         let slot = allowed == Mode::Edit && self.slots_used() < config.max_editors;
@@ -122,7 +121,7 @@ impl Room {
                 recheck_queued: false,
                 synced: None,
                 address,
-                sender,
+                outbox,
             },
         );
         self.seq += 1;
@@ -151,7 +150,7 @@ impl Room {
     /// Ends the member's session with `reason`, then removes it.
     pub fn close(&mut self, config: &LiveConfig, id: MemberId, reason: ByeReason) {
         if let Some(member) = self.members.get(&id) {
-            let _ = member.sender.try_send(Event::Close(reason));
+            let _ = member.outbox.offer(Event::Close(reason));
         }
         self.remove(config, id);
     }
@@ -487,9 +486,9 @@ impl Room {
         let Some(member) = self.members.get(&id) else {
             return;
         };
-        match member.sender.try_send(event) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_) | TrySendError::Closed(_)) => {
+        match member.outbox.offer(event) {
+            Offer::Queued => {}
+            Offer::Full | Offer::Closed => {
                 self.detach(id);
                 self.pending_announce = true;
             }

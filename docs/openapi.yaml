@@ -193,7 +193,7 @@ info:
     address) 100 (`TOO_MANY_CONNECTIONS`), the server 5000 (`SERVER_BUSY`); the network and server limits are
     configurable. The server pings every 20 s; a connection
     silent for 30 s has left (`bye` `timeout`, close 4000). A client that does not keep up with its messages is
-    dropped (close 4013). At shutdown: `bye` `shutdown`, close 1001.
+    dropped (close 4013): 64 queued, or 16 MiB of them not yet written (held behind a replay included). At shutdown: `bye` `shutdown`, close 1001.
 
     **Leader.** The most recent editor still present leads (`leader`); when it leaves, the most recent remaining
     editor does. While a room has more than one member in `edit` mode, `saveContent` from anyone but the leader's

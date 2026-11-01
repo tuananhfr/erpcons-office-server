@@ -1,7 +1,14 @@
-use std::{fmt, net::IpAddr};
+use std::{
+    fmt,
+    net::IpAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use serde::{Deserialize, Serialize, Serializer};
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, error::TrySendError};
 
 use crate::{Event, Mode, Notice};
 
@@ -87,7 +94,58 @@ pub(crate) struct Member {
     /// a cid from before what the room remembers can never pass as new.
     pub synced: Option<u64>,
     pub address: Option<IpAddr>,
+    pub outbox: Outbox,
+}
+
+/// A member's queue: at most `outbox` events and `cap` bytes of messages its session has not yet
+/// written, so a slow client cannot keep megabytes of updates alive.
+pub(crate) struct Outbox {
     pub sender: mpsc::Sender<Event>,
+    pub backlog: Arc<AtomicUsize>,
+    pub cap: usize,
+}
+
+pub(crate) enum Offer {
+    Queued,
+    Full,
+    Closed,
+}
+
+impl Outbox {
+    pub fn offer(&self, event: Event) -> Offer {
+        let weight = match &event {
+            Event::Send(frame) => frame.weight(),
+            Event::Close(_) | Event::Recheck => 0,
+        };
+        // Counted before it is queued, so the session's subtraction never comes first.
+        let before = self.backlog.fetch_add(weight, Ordering::Relaxed);
+        if weight > 0 && before.saturating_add(weight) > self.cap {
+            unsent(&self.backlog, weight);
+            return Offer::Full;
+        }
+        match self.sender.try_send(event) {
+            Ok(()) => Offer::Queued,
+            Err(e) => {
+                unsent(&self.backlog, weight);
+                match e {
+                    TrySendError::Full(_) => Offer::Full,
+                    TrySendError::Closed(_) => Offer::Closed,
+                }
+            }
+        }
+    }
+
+    /// At most half full, in events and in bytes: room for what may be dropped (cursors).
+    pub fn roomy(&self, outbox: usize) -> bool {
+        self.sender.capacity() > outbox / 2 && self.backlog.load(Ordering::Relaxed) < self.cap / 2
+    }
+}
+
+/// Takes back `weight` bytes a session wrote or that were never queued.
+pub(crate) fn unsent(backlog: &AtomicUsize, weight: usize) {
+    let _ = backlog.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+        Some(n.saturating_sub(weight))
+    });
 }
 
 impl Member {

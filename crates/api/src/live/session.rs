@@ -48,6 +48,8 @@ pub(super) enum End {
 }
 
 /// Room events held back while a replay is written; more than this and the client is too slow.
+/// Their bytes still count against the member's queue until written, so the room drops a client
+/// that falls too far behind meanwhile.
 const MAX_HELD_EVENTS: usize = 4096;
 
 pub(crate) async fn run(mut socket: WebSocket, session: Session) {
@@ -251,10 +253,11 @@ async fn on_event(
     grace: Duration,
 ) -> Option<End> {
     match event {
-        Event::Send(frame) => send(socket, frame.to_text(), grace)
-            .await
-            .err()
-            .map(|()| End::Gone),
+        Event::Send(frame) => {
+            let sent = send(socket, frame.to_text(), grace).await;
+            membership.written(&frame);
+            sent.err().map(|()| End::Gone)
+        }
         Event::Close(reason) => Some(End::Bye(reason)),
         Event::Recheck => {
             membership.recheck_started();

@@ -1,19 +1,37 @@
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicUsize};
 
 use uuid::Uuid;
 
-use crate::{ByeReason, Frame, Hub, MemberId, Mode, PresenceState, room::Replay};
+use crate::{ByeReason, Frame, Hub, MemberId, Mode, PresenceState, member::unsent, room::Replay};
 
 /// A session's place in a room; dropping it leaves the room, however the session ended.
 pub struct Membership {
     hub: Arc<Hub>,
     document: Uuid,
     id: MemberId,
+    /// The bytes of messages queued for this member and not yet written.
+    backlog: Arc<AtomicUsize>,
 }
 
 impl Membership {
-    pub(crate) fn new(hub: Arc<Hub>, document: Uuid, id: MemberId) -> Self {
-        Self { hub, document, id }
+    pub(crate) fn new(
+        hub: Arc<Hub>,
+        document: Uuid,
+        id: MemberId,
+        backlog: Arc<AtomicUsize>,
+    ) -> Self {
+        Self {
+            hub,
+            document,
+            id,
+            backlog,
+        }
+    }
+
+    /// The session wrote `frame`, taken off this member's queue: it no longer counts against the
+    /// queue's bytes.
+    pub fn written(&self, frame: &Frame) {
+        unsent(&self.backlog, frame.weight());
     }
 
     pub fn id(&self) -> MemberId {
