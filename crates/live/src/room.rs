@@ -44,6 +44,14 @@ impl Room {
         self.members.is_empty()
     }
 
+    /// Members who came through the public link.
+    pub fn links(&self) -> usize {
+        self.members
+            .values()
+            .filter(|m| matches!(m.participant, Participant::Link))
+            .count()
+    }
+
     /// Members removed since the last call, so the hub can release what they held.
     pub fn take_removed(&mut self) -> Vec<Member> {
         std::mem::take(&mut self.removed)

@@ -259,6 +259,41 @@ fn rooms_addresses_and_the_server_have_limits() {
 }
 
 #[test]
+fn accounts_and_link_holders_have_limits() {
+    let hub = hub(|c| {
+        c.max_per_actor = 2;
+        c.max_links_per_document = 1;
+    });
+    let doc = Uuid::new_v4();
+    let a1 = hub.join(doc, user("a"), Mode::Edit, ip(1)).expect("a1");
+    let _a2 = hub
+        .join(Uuid::new_v4(), user("a"), Mode::Edit, ip(2))
+        .expect("a2");
+    assert_eq!(
+        hub.join(doc, user("a"), Mode::Edit, ip(3)).err(),
+        Some(JoinRefused::ActorFull)
+    );
+    let link = hub
+        .join(doc, Participant::Link, Mode::View, ip(4))
+        .expect("link");
+    assert_eq!(
+        hub.join(doc, Participant::Link, Mode::View, ip(5)).err(),
+        Some(JoinRefused::RoomFull)
+    );
+    let _b = hub
+        .join(doc, user("b"), Mode::View, ip(5))
+        .expect("people it is shared with still join");
+    drop(link);
+    let _link = hub
+        .join(doc, Participant::Link, Mode::View, ip(5))
+        .expect("a link holder left");
+    drop(a1);
+    let _a3 = hub
+        .join(doc, user("a"), Mode::Edit, ip(3))
+        .expect("a connection of a closed");
+}
+
+#[test]
 fn a_member_that_falls_behind_is_dropped() {
     let hub = hub(|c| c.outbox = 2);
     let doc = Uuid::new_v4();

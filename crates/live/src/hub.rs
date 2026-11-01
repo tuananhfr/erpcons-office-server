@@ -1,5 +1,5 @@
-//! All rooms of this node, and the connection counts per address and in all. One lock guards
-//! them: every operation is a few map updates and non-blocking sends.
+//! All rooms of this node, and the connection counts per address, per account and in all. One
+//! lock guards them: every operation is a few map updates and non-blocking sends.
 use std::{
     collections::HashMap,
     net::IpAddr,
@@ -18,8 +18,10 @@ use crate::{
 /// Why a connection could not join.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JoinRefused {
+    /// The document's room, or its share for link holders, is full.
     RoomFull,
     AddressFull,
+    ActorFull,
     ServerFull,
     ShuttingDown,
 }
@@ -28,6 +30,7 @@ pub enum JoinRefused {
 struct State {
     rooms: HashMap<Uuid, Room>,
     per_address: HashMap<Option<IpAddr>, usize>,
+    per_actor: HashMap<String, usize>,
     total: usize,
 }
 
@@ -69,8 +72,16 @@ impl Hub {
         if state.per_address.get(&address).copied().unwrap_or(0) >= self.config.max_per_address {
             return Err(JoinRefused::AddressFull);
         }
+        let actor = participant.actor_id().map(str::to_owned);
+        if let Some(actor) = &actor
+            && state.per_actor.get(actor).copied().unwrap_or(0) >= self.config.max_per_actor
+        {
+            return Err(JoinRefused::ActorFull);
+        }
         let room = state.rooms.entry(document).or_insert_with(Room::new);
-        if room.len() >= self.config.max_per_document {
+        let links_full = matches!(participant, Participant::Link)
+            && room.links() >= self.config.max_links_per_document;
+        if room.len() >= self.config.max_per_document || links_full {
             if room.is_empty() {
                 state.rooms.remove(&document);
             }
@@ -81,6 +92,9 @@ impl Hub {
         let removed = room.take_removed();
         state.total += 1;
         *state.per_address.entry(address).or_insert(0) += 1;
+        if let Some(actor) = actor {
+            *state.per_actor.entry(actor).or_insert(0) += 1;
+        }
         Self::release(&mut state, document, removed);
         Ok((Membership::new(self.clone(), document, id), receiver))
     }
@@ -167,6 +181,14 @@ impl Hub {
                 *count = count.saturating_sub(1);
                 if *count == 0 {
                     state.per_address.remove(&member.address);
+                }
+            }
+            if let Some(actor) = member.participant.actor_id()
+                && let Some(count) = state.per_actor.get_mut(actor)
+            {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    state.per_actor.remove(actor);
                 }
             }
         }

@@ -17,10 +17,15 @@ pub struct LiveConfig {
     pub message_burst: u32,
     pub messages_per_second: f64,
     pub max_per_document: usize,
+    /// Of those, members who came through the public link; the rest stay for people it is shared
+    /// with.
+    pub max_links_per_document: usize,
     /// Members past this who may edit join in view mode, told so, until a slot frees.
     pub max_editors: usize,
     /// Connections from one client address (an IPv6 client by its /64).
     pub max_per_address: usize,
+    /// Connections of one account, over all documents.
+    pub max_per_actor: usize,
     pub max_connections: usize,
     pub ping_interval: Duration,
     /// Nothing heard for this long and the member has left.
@@ -43,9 +48,11 @@ impl Default for LiveConfig {
             message_burst: 20,
             messages_per_second: 10.0,
             max_per_document: 50,
+            max_links_per_document: 30,
             max_editors: 10,
             // Offices share one public address behind NAT.
             max_per_address: 100,
+            max_per_actor: 20,
             max_connections: 5_000,
             ping_interval: Duration::from_secs(20),
             idle_timeout: Duration::from_secs(30),

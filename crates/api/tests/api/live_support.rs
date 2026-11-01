@@ -182,6 +182,12 @@ impl Ws {
     }
 }
 
+/// A ticket for `doc` with a public link's token, then the connection.
+pub async fn join_link(app: &TestApp, link: &str, doc: &str) -> Ws {
+    let body = ok_json(link_ticket(app, link, doc).await, 200).await;
+    connect(app, doc, body["ticket"].as_str().expect("ticket")).await
+}
+
 /// Waits until the room of `doc` has `n` members.
 pub async fn wait_members(app: &TestApp, doc: &str, n: usize) {
     let id = doc.parse().expect("uuid");

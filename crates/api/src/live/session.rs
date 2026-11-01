@@ -48,7 +48,9 @@ pub(crate) async fn run(mut socket: WebSocket, session: Session) {
         Err(refused) => {
             let (code, close_code) = match refused {
                 JoinRefused::RoomFull => (LiveErrorCode::RoomFull, CloseCode::Full),
-                JoinRefused::AddressFull => (LiveErrorCode::TooManyConnections, CloseCode::Full),
+                JoinRefused::AddressFull | JoinRefused::ActorFull => {
+                    (LiveErrorCode::TooManyConnections, CloseCode::Full)
+                }
                 JoinRefused::ServerFull => (LiveErrorCode::ServerBusy, CloseCode::Full),
                 JoinRefused::ShuttingDown => (LiveErrorCode::ServerBusy, CloseCode::GoingAway),
             };
