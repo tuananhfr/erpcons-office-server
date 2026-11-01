@@ -52,10 +52,7 @@ impl AppState {
         config: ApiConfig,
     ) -> Self {
         let live = Arc::new(Hub::new(config.live.clone()));
-        let tickets = Arc::new(Tickets::new(
-            config.live.ticket_ttl,
-            config.live.max_tickets,
-        ));
+        let tickets = Arc::new(Tickets::new(&config.live));
         let docs = Arc::new(
             Documents::new(db.clone(), storage.clone(), config.quota)
                 .with_mail(config.mail)

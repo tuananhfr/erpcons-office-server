@@ -7,6 +7,10 @@ pub struct LiveConfig {
     pub ticket_ttl: Duration,
     /// Unredeemed tickets held at once, server-wide.
     pub max_tickets: usize,
+    /// Unredeemed tickets of one holder (account or public link), and from one client address; a
+    /// new one past either replaces that key's oldest, so nobody can fill the store for everyone.
+    pub max_tickets_per_holder: usize,
+    pub max_tickets_per_address: usize,
     /// Largest message or frame a client may send.
     pub max_message_bytes: usize,
     /// Messages a connection may send at once, then refilled at `messages_per_second`.
@@ -32,6 +36,9 @@ impl Default for LiveConfig {
         Self {
             ticket_ttl: Duration::from_secs(30),
             max_tickets: 10_000,
+            // Tickets are spent within moments of their issue; these bound only abuse.
+            max_tickets_per_holder: 20,
+            max_tickets_per_address: 100,
             max_message_bytes: 16 * 1024,
             message_burst: 20,
             messages_per_second: 10.0,

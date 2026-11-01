@@ -20,6 +20,14 @@ impl Viewer {
         docs.live_access(id, viewer).await
     }
 
+    /// Names the holder for the ticket quota: the account, or the link (its token's sha256).
+    pub(crate) fn quota_key(&self) -> String {
+        match self {
+            Self::Actor(actor) => format!("actor:{}", actor.actor_id),
+            Self::Link(hash) => format!("link:{}", hash.as_str()),
+        }
+    }
+
     pub(crate) fn participant(&self) -> Participant {
         match self {
             Self::Actor(actor) => Participant::User {

@@ -647,6 +647,8 @@ paths:
         With `Authorization: Bearer` (any role), or without signing in with `X-Link-Token` (the public link's token;
         rate limited per address like `openLink`, audited as a link view). When `X-Link-Token` is sent, it alone
         decides. The ticket is valid for `expires_in` seconds, for this document, from this client address, once.
+        One account or link holds at most 20 unspent tickets and one client address 100; a new ticket past either
+        replaces that one's oldest. 503 only when the whole server holds 10 000.
       parameters:
         - name: X-Link-Token
           in: header

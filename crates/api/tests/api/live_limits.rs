@@ -7,7 +7,7 @@ use serde_json::json;
 
 use crate::{
     live::shared_document,
-    live_support::{Ws, connect, join, ticket, wait_members},
+    live_support::{Ws, connect, join, refused, ticket, wait_members},
     support::TestApp,
 };
 
@@ -117,4 +117,34 @@ async fn an_oversized_message_closes_the_connection() {
     })
     .await
     .expect("left");
+}
+
+#[tokio::test]
+async fn one_holder_cannot_fill_the_ticket_store() {
+    let Some(app) = TestApp::spawn_with(|s| {
+        s.api.live = LiveConfig {
+            max_tickets: 3,
+            max_tickets_per_holder: 2,
+            ..LiveConfig::default()
+        };
+    })
+    .await
+    else {
+        return;
+    };
+    let (a, b, _, doc, _) = shared_document(&app).await;
+    let mut issued = Vec::new();
+    for _ in 0..5 {
+        issued.push(ticket(&app, &a, &doc).await);
+    }
+    let other = ticket(&app, &b, &doc).await;
+    assert_eq!(
+        refused(&app, &doc, &issued[0]).await,
+        401,
+        "the oldest went"
+    );
+    let mut newest = connect(&app, &doc, &issued[4]).await;
+    newest.next_of("hello").await;
+    let mut wb = connect(&app, &doc, &other).await;
+    wb.next_of("hello").await;
 }
