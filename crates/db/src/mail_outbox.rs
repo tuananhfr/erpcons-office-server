@@ -28,6 +28,70 @@ pub async fn enqueue(conn: &mut PgConnection, mail: &NewMail<'_>) -> Result<(), 
     .map(drop)
 }
 
+/// As [`enqueue`], due only `delay_secs` from now (a batch that gathers what happens meanwhile).
+pub async fn enqueue_in(
+    conn: &mut PgConnection,
+    mail: &NewMail<'_>,
+    delay_secs: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO mail_outbox (id, kind, sender_id, to_email, payload, next_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, now() + make_interval(secs => $6))",
+    )
+    .bind(Uuid::now_v7())
+    .bind(mail.kind)
+    .bind(mail.sender_id)
+    .bind(mail.to_email)
+    .bind(mail.payload)
+    .bind(delay_secs as f64)
+    .execute(conn)
+    .await
+    .map(drop)
+}
+
+/// Whether a mail of `kind` for `recipient_id` about `document_id` (and `thread_id`, when given)
+/// waits untaken by the sender: it will cover what happens until it is sent.
+pub async fn comment_pending(
+    db: impl PgExecutor<'_>,
+    kind: &str,
+    recipient_id: &str,
+    document_id: Uuid,
+    thread_id: Option<Uuid>,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM mail_outbox
+             WHERE kind = $1 AND payload->>'recipient_id' = $2 AND payload->>'document_id' = $3
+               AND ($4::text IS NULL OR payload->>'thread_id' = $4)
+               AND sent_at IS NULL AND failed_at IS NULL AND attempts = 0
+               AND kind IN ('comment_reply', 'comment_threads'))",
+    )
+    .bind(kind)
+    .bind(recipient_id)
+    .bind(document_id.to_string())
+    .bind(thread_id.map(|t| t.to_string()))
+    .fetch_one(db)
+    .await
+}
+
+/// Mails of any of `kinds` to `to_email` in the last `secs` seconds.
+pub async fn received_of_kinds_since(
+    db: impl PgExecutor<'_>,
+    to_email: &str,
+    kinds: &[&str],
+    secs: i64,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM mail_outbox
+         WHERE to_email = $1 AND kind = ANY($2) AND created_at > now() - make_interval(secs => $3)",
+    )
+    .bind(to_email)
+    .bind(kinds)
+    .bind(secs as f64)
+    .fetch_one(db)
+    .await
+}
+
 /// Mails `sender_id` caused in the last `secs` seconds, sent or not.
 pub async fn caused_since(
     db: impl PgExecutor<'_>,

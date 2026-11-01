@@ -4,6 +4,7 @@ pub mod acl;
 pub mod actor_emails;
 pub mod actors;
 pub mod audit;
+pub mod comments;
 pub mod documents;
 mod errors;
 pub mod folders;

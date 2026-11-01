@@ -157,6 +157,23 @@ pub async fn forget_sharing(
     Ok(acl.rows_affected() + settings.rows_affected())
 }
 
+/// Deletes the comment threads (and so the comments) of purge-bound or purged documents (`ids`
+/// only, when given): a purged document keeps its metadata, never what people wrote on it.
+pub async fn forget_comments(
+    conn: &mut PgConnection,
+    ids: Option<&[Uuid]>,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "DELETE FROM comment_threads t USING documents d
+         WHERE d.id = t.document_id AND d.state IN ('PURGE_PENDING', 'PURGED')
+           AND ($1::uuid[] IS NULL OR d.id = ANY($1))",
+    )
+    .bind(ids)
+    .execute(conn)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// As [`dead_objects`], limited to the content of `document_ids`.
 pub async fn dead_objects_of(
     db: impl PgExecutor<'_>,
