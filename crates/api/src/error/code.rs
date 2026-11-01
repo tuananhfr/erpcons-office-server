@@ -27,10 +27,11 @@ pub enum ErrorCode {
     SignupClosed,
     SignupDailyLimit,
     NotLeader,
+    TooManyComments,
 }
 
 impl ErrorCode {
-    pub const ALL: [ErrorCode; 22] = [
+    pub const ALL: [ErrorCode; 23] = [
         Self::Unauthenticated,
         Self::Forbidden,
         Self::NotFound,
@@ -53,6 +54,7 @@ impl ErrorCode {
         Self::SignupClosed,
         Self::SignupDailyLimit,
         Self::NotLeader,
+        Self::TooManyComments,
     ];
 
     pub fn status(self) -> StatusCode {
@@ -70,7 +72,8 @@ impl ErrorCode {
             | Self::InvalidSignature
             | Self::InvalidRequest
             | Self::IdempotencyMismatch
-            | Self::TooManyPermissions => StatusCode::UNPROCESSABLE_ENTITY,
+            | Self::TooManyPermissions
+            | Self::TooManyComments => StatusCode::UNPROCESSABLE_ENTITY,
             Self::RateLimited | Self::SignupDailyLimit => StatusCode::TOO_MANY_REQUESTS,
             Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
@@ -110,6 +113,9 @@ impl ErrorCode {
             }
             Self::NotLeader => {
                 "Tài liệu đang được nhiều người cùng sửa; bản lưu do người dẫn phòng thực hiện."
+            }
+            Self::TooManyComments => {
+                "Tài liệu hoặc chuỗi nhận xét này đã có số nhận xét tối đa. Hãy xoá bớt chuỗi đã xử lý."
             }
         }
     }

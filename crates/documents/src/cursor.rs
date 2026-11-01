@@ -35,6 +35,23 @@ fn uuid(s: &str) -> Result<Uuid, DocError> {
     Uuid::parse_str(s).map_err(|_| DocError::InvalidRequest)
 }
 
+/// Where a listing of comment threads resumes: after this thread (threads go by id).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThreadCursor(pub Uuid);
+
+impl ThreadCursor {
+    pub fn encode(self) -> String {
+        encode(&format!("k1:{}", self.0))
+    }
+
+    pub fn decode(cursor: &str) -> Result<Self, DocError> {
+        match decode(cursor)?.split_once(':') {
+            Some(("k1", id)) => Ok(Self(uuid(id)?)),
+            _ => Err(DocError::InvalidRequest),
+        }
+    }
+}
+
 impl ChildrenCursor {
     pub fn encode(self) -> String {
         match self {

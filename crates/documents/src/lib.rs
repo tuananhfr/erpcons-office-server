@@ -1,6 +1,7 @@
 //! Document service: folders, documents and their immutable versions, trash, quota, upload checks,
-//! sharing, and the purge and orphan jobs. Every access decision goes through [`authorize`].
+//! sharing, comments, and the purge and orphan jobs. Every access decision goes through [`authorize`].
 mod authorize;
+mod comments_model;
 mod cursor;
 mod email;
 mod error;
@@ -19,6 +20,11 @@ mod sharing_model;
 mod templates;
 
 pub use authorize::{Action, Denied, Resource, Role, authorize};
+pub use comments_model::{
+    Anchor, AnchorChange, Body, Comment, MAX_ANCHOR_BYTES, MAX_ANCHOR_CHANGES, MAX_BODY_CHARS,
+    MAX_COMMENTS_PER_THREAD, MAX_REGION_BYTES, MAX_THREADS_PER_DOCUMENT, NewThread, Thread,
+    ThreadStatus, Threads, check_region,
+};
 pub use email::{Email, InvalidEmail};
 pub use error::{BodyTooLarge, DocError};
 pub use fail_points::{FailPoint, FailPoints, Held};

@@ -38,6 +38,9 @@ impl Documents {
         purge::forget_sharing(&mut tx, Some(&marked))
             .await
             .map_err(DocError::db)?;
+        purge::forget_comments(&mut tx, Some(&marked))
+            .await
+            .map_err(DocError::db)?;
         audit::success(&mut tx, c, "document.purge", Subject::Document(id)).await?;
         tx.commit().await.map_err(DocError::db)?;
         self.release_purged(&marked).await;
@@ -66,6 +69,9 @@ impl Documents {
             .map_err(DocError::db)?
             .ok_or(DocError::NotFound)?;
         purge::forget_sharing(&mut tx, Some(&removed.documents))
+            .await
+            .map_err(DocError::db)?;
+        purge::forget_comments(&mut tx, Some(&removed.documents))
             .await
             .map_err(DocError::db)?;
         audit::success(&mut tx, c, "folder.purge", Subject::Folder(id)).await?;

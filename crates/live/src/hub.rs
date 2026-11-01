@@ -142,6 +142,13 @@ impl Hub {
         self.with_room(document, Room::recheck);
     }
 
+    /// A comment thread of `document` changed (`None`: several did).
+    pub fn comments_changed(&self, document: Uuid, thread: Option<Uuid>) {
+        self.with_room(document, |room, config| {
+            room.comments_changed(config, thread);
+        });
+    }
+
     pub(crate) fn recheck_started(&self, document: Uuid, member: MemberId) {
         self.with_room(document, |room, _| room.recheck_started(member));
     }

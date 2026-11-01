@@ -1,3 +1,4 @@
+pub(crate) mod comments;
 pub(crate) mod content;
 pub(crate) mod documents;
 pub(crate) mod folders;

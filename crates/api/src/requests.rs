@@ -1,6 +1,7 @@
 //! Request bodies and query strings of the contract.
 use office_documents::{PageRequest, Role};
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::{Map, Value};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -13,8 +14,8 @@ const MAX_CURSOR_LEN: usize = 200;
 /// `cursor` and `limit` (1–200, default 50).
 #[derive(Deserialize)]
 pub(crate) struct PageQuery {
-    cursor: Option<String>,
-    limit: Option<u32>,
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
 }
 
 impl PageQuery {
@@ -112,4 +113,44 @@ pub(crate) struct PutShareSettings {
 pub(crate) struct EnableLink {
     #[serde(default, deserialize_with = "present_time")]
     pub expires_at: Option<Option<OffsetDateTime>>,
+}
+
+/// `listComments`: a status filter, then a page.
+#[derive(Deserialize)]
+pub(crate) struct CommentsQuery {
+    pub status: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct CreateThread {
+    pub anchor: Map<String, Value>,
+    #[serde(default)]
+    pub region: Option<String>,
+    #[serde(default)]
+    pub version: Option<i32>,
+    pub body: String,
+}
+
+/// A reply, or the new words of a comment.
+#[derive(Deserialize, Serialize)]
+pub(crate) struct CommentBody {
+    pub body: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ChangeAnchors {
+    pub updates: Vec<AnchorUpdate>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct AnchorUpdate {
+    pub thread_id: Uuid,
+    #[serde(default)]
+    pub anchor: Option<Map<String, Value>>,
+    #[serde(default, deserialize_with = "present")]
+    pub region: Option<Option<String>>,
+    #[serde(default)]
+    pub status: Option<String>,
 }

@@ -7,7 +7,7 @@ use super::{Caller, Documents, access::Accessed};
 use crate::{DocError, Email, Role};
 
 /// The caps' rolling window; the outbox keeps sent rows longer than this.
-const WINDOW_SECS: i64 = 24 * 3600;
+pub(super) const WINDOW_SECS: i64 = 24 * 3600;
 
 /// What the mail says besides who sends it.
 pub(super) struct Invite<'a> {
@@ -78,7 +78,7 @@ impl Documents {
     }
 }
 
-fn remaining(cap: u32, used: i64) -> u32 {
+pub(super) fn remaining(cap: u32, used: i64) -> u32 {
     let used = u32::try_from(used.max(0)).unwrap_or(u32::MAX);
     cap.saturating_sub(used)
 }

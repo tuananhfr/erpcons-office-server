@@ -74,7 +74,7 @@ fn paragraph(s: &str) -> String {
 }
 
 /// The site's editor path of a document kind (`erpcons-office` `src/config/editors.ts`).
-fn editor_slug(kind: &str) -> &'static str {
+pub(crate) fn editor_slug(kind: &str) -> &'static str {
     match kind {
         "sheet" => "bang-tinh",
         "slide" => "trinh-chieu",

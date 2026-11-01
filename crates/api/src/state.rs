@@ -37,6 +37,8 @@ pub struct AppState {
     pub(crate) upload_slots: Arc<ConcurrencyLimiter>,
     /// Public view links, per client.
     pub(crate) link_limiter: Arc<KeyedLimiter<ClientKey>>,
+    /// Comment writes, per actor.
+    pub(crate) comment_limiter: Arc<KeyedLimiter<String>>,
     pub(crate) signups: Arc<Signups>,
     pub(crate) signup_limiter: Arc<KeyedLimiter<ClientKey>>,
     pub(crate) signup_verify_limiter: Arc<KeyedLimiter<ClientKey>>,
@@ -71,6 +73,7 @@ impl AppState {
             denial_audit: Arc::new(KeyedLimiter::new(DENIAL_AUDIT_RATE)),
             upload_slots: Arc::new(ConcurrencyLimiter::new(config.max_concurrent_uploads)),
             link_limiter: Arc::new(KeyedLimiter::new(config.link_rate)),
+            comment_limiter: Arc::new(KeyedLimiter::new(config.comment_rate)),
             signups,
             signup_limiter: Arc::new(KeyedLimiter::new(config.signup_rate)),
             signup_verify_limiter: Arc::new(KeyedLimiter::new(config.signup_verify_rate)),

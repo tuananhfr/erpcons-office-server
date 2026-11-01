@@ -8,6 +8,48 @@ pub const KIND_SIGNUP_VERIFY: &str = "signup_verify";
 /// `mail_outbox.kind` of "this address already had a PI ID account" ([`SignupNotice`]).
 pub const KIND_SIGNUP_EXISTING: &str = "signup_existing";
 
+/// `mail_outbox.kind` of "someone replied in a thread you wrote in" ([`CommentNotice`]).
+pub const KIND_COMMENT_REPLY: &str = "comment_reply";
+/// `mail_outbox.kind` of "new comments on your document", one per document and 15 minutes
+/// ([`CommentNotice`]).
+pub const KIND_COMMENT_THREADS: &str = "comment_threads";
+
+/// A comment mail. Never the words of a comment: only where to look. Stored as the outbox payload.
+/// No `Debug`: names are personal data.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommentNotice {
+    pub document_id: Uuid,
+    /// `word`, `sheet`, `slide` or `pdf`: picks the editor the link opens.
+    pub kind: String,
+    /// The thread the link opens: the one replied in, or the first new one.
+    pub thread_id: Uuid,
+    /// Whose access is checked again when the mail is due.
+    pub recipient_id: String,
+    /// Who replied (replies only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replier_name: Option<String>,
+    /// New threads from this time on are counted when the mail is due (new threads only).
+    #[serde(
+        default,
+        with = "time::serde::rfc3339::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub since: Option<time::OffsetDateTime>,
+    /// Only when the server is configured to include titles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+impl CommentNotice {
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    pub fn from_json(json: &str) -> Option<Self> {
+        serde_json::from_str(json).ok()
+    }
+}
+
 /// "Someone shared a document with you". Stored as the outbox payload. No `Debug`: names and the
 /// message are personal data.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]

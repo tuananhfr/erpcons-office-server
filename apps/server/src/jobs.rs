@@ -6,7 +6,7 @@ use office_documents::{
     Documents,
     jobs::{AuditRetentionConfig, OrphanConfig, PurgeConfig},
 };
-use office_mail::{MailTransport, OutboxConfig, SignupTokens, run_outbox};
+use office_mail::{MailSources, MailTransport, OutboxConfig, run_outbox};
 use office_signup::{PiRegistrar, PushConfig, Signups, expire, run_push};
 use tokio::{
     task::JoinHandle,
@@ -32,6 +32,8 @@ pub(crate) struct MailJob {
     pub public_origin: String,
     /// Issues the tokens of verification mails.
     pub signups: Arc<Signups>,
+    /// Checks comment mails again when they are due.
+    pub documents: Arc<Documents>,
 }
 
 /// Hands verified sign-ups to PI, when sign-up is open.
@@ -67,12 +69,15 @@ impl Jobs {
                 let mail = mail.clone();
                 async move {
                     let config = OutboxConfig::default();
-                    let tokens: &dyn SignupTokens = &*mail.signups;
+                    let sources = MailSources {
+                        signups: Some(&*mail.signups),
+                        comments: Some(&*mail.documents),
+                    };
                     let round = run_outbox(
                         &mail.db,
                         &*mail.transport,
                         &mail.public_origin,
-                        Some(tokens),
+                        sources,
                         &config,
                     );
                     match round.await {
@@ -120,6 +125,7 @@ impl Jobs {
                             objects_deleted = r.objects_deleted,
                             folders_deleted = r.folders_deleted,
                             shares_removed = r.shares_removed,
+                            threads_removed = r.threads_removed,
                             idempotency_keys_expired = r.idempotency_keys_expired,
                             "purge done"
                         ),

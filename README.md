@@ -60,6 +60,7 @@ site's own origin (`office.erpcons.vn`, Apache reverse proxy to `127.0.0.1:8710`
 | `ERPCONS_ORPHAN_MIN_AGE_SECS` | `600` (at least `60`) | Stored bytes with no row are deleted once this old |
 | `ERPCONS_AUDIT_RETENTION_DAYS` | `180` | Audit rows older than this are deleted hourly; `0` keeps them forever |
 | `ERPCONS_RATE_LINK_BURST` / `ERPCONS_RATE_LINK_PER_SEC` | `60` / `2` | Per client address, opening public view links (no sign-in) |
+| `ERPCONS_RATE_COMMENT_BURST` / `ERPCONS_RATE_COMMENT_PER_SEC` | `30` / `0.5` | Per actor, comment writes (every comment operation but the two reads) |
 | `ERPCONS_SMTP_HOST` | unset | SMTP server for "shared with you" mail; unset, no mail is queued or sent and the settings below are ignored |
 | `ERPCONS_SMTP_TLS` / `ERPCONS_SMTP_PORT` | `starttls` / by mode | `starttls` (587), `tls` (465) or `none` (25, a local relay only) |
 | `ERPCONS_SMTP_USERNAME` / `ERPCONS_SMTP_PASSWORD` | unset | Both or neither |

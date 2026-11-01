@@ -44,7 +44,12 @@ impl Role {
 
     /// The role of `actor` on a document of `owner_id`, given the permission it holds there.
     pub fn of(actor: Option<&Actor>, owner_id: &str, grant: Option<Self>) -> Option<Self> {
-        let is_owner = actor.is_some_and(|a| !a.actor_id.is_empty() && a.actor_id == owner_id);
+        Self::of_id(actor.map(|a| a.actor_id.as_str()), owner_id, grant)
+    }
+
+    /// As [`Self::of`], for someone known only by id (the recipient of a mail).
+    pub fn of_id(actor_id: Option<&str>, owner_id: &str, grant: Option<Self>) -> Option<Self> {
+        let is_owner = actor_id.is_some_and(|a| !a.is_empty() && a == owner_id);
         if is_owner {
             Some(Self::Owner)
         } else {
@@ -78,6 +83,12 @@ pub enum Action {
     ChangeShareSettings,
     /// Remove one's own permission.
     Leave,
+    /// See the comment threads (plan-m5: not viewers, not link holders).
+    ReadComments,
+    /// Start a thread, reply, edit or delete one's own comment, and report re-placed anchors.
+    Comment,
+    /// Resolve, reopen and delete whole threads.
+    ModerateComments,
 }
 
 /// What is being accessed, as loaded from the database for this request.
@@ -152,6 +163,8 @@ fn document_allows(role: Role, action: Action, editors_can_share: bool) -> bool 
         Action::ListPermissions => role != Link,
         Action::Share => role == Owner || (role == Editor && editors_can_share),
         Action::Leave => matches!(role, Editor | Commenter | Viewer),
+        Action::ReadComments | Action::Comment => matches!(role, Owner | Editor | Commenter),
+        Action::ModerateComments => matches!(role, Owner | Editor),
     }
 }
 
@@ -161,7 +174,7 @@ mod tests {
 
     use super::*;
 
-    const ACTIONS: [Action; 13] = [
+    const ACTIONS: [Action; 16] = [
         Action::Read,
         Action::ReadVersions,
         Action::Write,
@@ -175,6 +188,9 @@ mod tests {
         Action::Share,
         Action::ChangeShareSettings,
         Action::Leave,
+        Action::ReadComments,
+        Action::Comment,
+        Action::ModerateComments,
     ];
 
     fn actor(id: &str) -> Actor {
@@ -210,6 +226,8 @@ mod tests {
             Action::ListPermissions => [true, true, true, true, false],
             Action::Share => [true, editors_can_share, false, false, false],
             Action::Leave => [false, true, true, true, false],
+            Action::ReadComments | Action::Comment => [true, true, true, false, false],
+            Action::ModerateComments => [true, true, false, false, false],
         }
     }
 

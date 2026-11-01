@@ -44,6 +44,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             transport: Arc::new(SmtpTransport::new(mail)?),
             public_origin: mail.public_origin.clone(),
             signups: state.signups().clone(),
+            documents: state.documents().clone(),
         }),
         None => None,
     };

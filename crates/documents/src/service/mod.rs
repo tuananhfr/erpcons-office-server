@@ -1,6 +1,10 @@
 mod access;
 mod actor_sync;
 mod audit;
+mod comment_mail;
+mod comment_threads;
+mod comment_writes;
+mod comments;
 mod content;
 mod documents;
 mod folders;

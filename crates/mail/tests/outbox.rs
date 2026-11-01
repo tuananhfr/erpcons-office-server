@@ -5,6 +5,7 @@ use async_trait::async_trait;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use office_db::{mail_outbox, testing::TestDb};
+use office_mail::MailSources;
 use office_mail::{
     IssuedToken, KIND_SHARED, KIND_SIGNUP_EXISTING, KIND_SIGNUP_VERIFY, MailConfig, OutboxConfig,
     SendError, SharedNotice, SignupNotice, SignupTokens, SmtpConfig, SmtpTransport, TlsMode,
@@ -201,21 +202,39 @@ async fn a_temporary_refusal_is_retried_then_sent() {
     queue(&db, document_id).await;
     let config = OutboxConfig::default();
 
-    let first = run_outbox(db.pool(), &transport, ORIGIN, None, &config)
-        .await
-        .expect("first round");
+    let first = run_outbox(
+        db.pool(),
+        &transport,
+        ORIGIN,
+        MailSources::default(),
+        &config,
+    )
+    .await
+    .expect("first round");
     assert_eq!((first.sent, first.retried, first.failed), (0, 1, 0));
     assert_eq!(row(&db).await, (1, false, false));
     // Backed off: a second round right away sends nothing.
-    let waiting = run_outbox(db.pool(), &transport, ORIGIN, None, &config)
-        .await
-        .expect("waiting round");
+    let waiting = run_outbox(
+        db.pool(),
+        &transport,
+        ORIGIN,
+        MailSources::default(),
+        &config,
+    )
+    .await
+    .expect("waiting round");
     assert_eq!(waiting.sent + waiting.retried, 0);
 
     make_due(&db).await;
-    let second = run_outbox(db.pool(), &transport, ORIGIN, None, &config)
-        .await
-        .expect("second round");
+    let second = run_outbox(
+        db.pool(),
+        &transport,
+        ORIGIN,
+        MailSources::default(),
+        &config,
+    )
+    .await
+    .expect("second round");
     assert_eq!((second.sent, second.retried, second.failed), (1, 0, 0));
     assert_eq!(row(&db).await, (2, true, false));
     let received = smtp.received();
@@ -240,9 +259,15 @@ async fn a_permanent_refusal_or_a_day_of_failures_gives_up() {
     let transport = transport(port);
     let config = OutboxConfig::default();
     queue(&db, Uuid::now_v7()).await;
-    let report = run_outbox(db.pool(), &transport, ORIGIN, None, &config)
-        .await
-        .expect("round");
+    let report = run_outbox(
+        db.pool(),
+        &transport,
+        ORIGIN,
+        MailSources::default(),
+        &config,
+    )
+    .await
+    .expect("round");
     assert_eq!((report.sent, report.retried, report.failed), (0, 0, 1));
     assert_eq!(row(&db).await, (1, false, true));
 
@@ -255,9 +280,15 @@ async fn a_permanent_refusal_or_a_day_of_failures_gives_up() {
         .execute(db.pool())
         .await
         .expect("age");
-    let report = run_outbox(db.pool(), &transport, ORIGIN, None, &config)
-        .await
-        .expect("round");
+    let report = run_outbox(
+        db.pool(),
+        &transport,
+        ORIGIN,
+        MailSources::default(),
+        &config,
+    )
+    .await
+    .expect("round");
     assert_eq!((report.sent, report.retried, report.failed), (0, 0, 1));
 
     // Done rows hold an address: they go once old enough.
@@ -265,9 +296,15 @@ async fn a_permanent_refusal_or_a_day_of_failures_gives_up() {
         .execute(db.pool())
         .await
         .expect("age");
-    let report = run_outbox(db.pool(), &transport, ORIGIN, None, &config)
-        .await
-        .expect("round");
+    let report = run_outbox(
+        db.pool(),
+        &transport,
+        ORIGIN,
+        MailSources::default(),
+        &config,
+    )
+    .await
+    .expect("round");
     assert_eq!(report.deleted, 1);
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM mail_outbox")
@@ -333,7 +370,7 @@ async fn sign_up_mails_get_their_token_when_sent_and_stale_ones_are_dropped() {
         db.pool(),
         &transport,
         ORIGIN,
-        None,
+        MailSources::default(),
         &OutboxConfig::default(),
     )
     .await
@@ -349,7 +386,10 @@ async fn sign_up_mails_get_their_token_when_sent_and_stale_ones_are_dropped() {
         db.pool(),
         &transport,
         ORIGIN,
-        Some(&tokens),
+        MailSources {
+            signups: Some(&tokens),
+            comments: None,
+        },
         &OutboxConfig::default(),
     )
     .await

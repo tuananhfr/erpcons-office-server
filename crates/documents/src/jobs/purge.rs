@@ -34,6 +34,8 @@ pub struct PurgeReport {
     pub folders_deleted: u64,
     /// Permissions and share settings of purged documents.
     pub shares_removed: u64,
+    /// Comment threads of purged documents deleted.
+    pub threads_removed: u64,
     pub idempotency_keys_expired: u64,
 }
 
@@ -77,6 +79,9 @@ impl Documents {
         report.documents_purged = purged.len() as u64;
         // Also catches what a purge by an older binary, which knew no sharing, left behind.
         report.shares_removed = purge::forget_sharing(&mut tx, None)
+            .await
+            .map_err(DocError::db)?;
+        report.threads_removed = purge::forget_comments(&mut tx, None)
             .await
             .map_err(DocError::db)?;
         loop {

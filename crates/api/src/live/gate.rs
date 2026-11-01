@@ -19,4 +19,8 @@ impl LiveRooms for LiveGate {
     fn saved(&self, document: Uuid, actor_id: &str, live_seq: u64, version: i32) {
         self.0.saved(document, actor_id, live_seq, version);
     }
+
+    fn comments_changed(&self, document: Uuid, thread: Option<Uuid>) {
+        self.0.comments_changed(document, thread);
+    }
 }

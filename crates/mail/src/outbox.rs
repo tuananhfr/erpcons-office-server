@@ -8,8 +8,10 @@ use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::{
-    KIND_SHARED, KIND_SIGNUP_EXISTING, KIND_SIGNUP_VERIFY, MailTransport, SendError, SharedNotice,
-    SignupNotice, SignupTokens, render_shared, render_signup_existing, render_signup_verify,
+    CommentMails, CommentNotice, KIND_COMMENT_REPLY, KIND_COMMENT_THREADS, KIND_SHARED,
+    KIND_SIGNUP_EXISTING, KIND_SIGNUP_VERIFY, MailTransport, SendError, SharedNotice, SignupNotice,
+    SignupTokens, render_comment_reply, render_comment_threads, render_shared,
+    render_signup_existing, render_signup_verify,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,7 +47,8 @@ pub struct OutboxReport {
     pub sent: u64,
     pub retried: u64,
     pub failed: u64,
-    /// Verification mails of sign-ups that were replaced, verified or expired before sending.
+    /// Verification mails of sign-ups that were replaced, verified or expired before sending, and
+    /// comment mails whose recipient lost access or that had nothing left to tell.
     pub dropped: u64,
     pub deleted: u64,
 }
@@ -77,12 +80,22 @@ fn unknown(mail_id: Uuid) -> Result<Delivery, SendError> {
     Err(SendError::Permanent)
 }
 
+/// The services a mail's text depends on when it is due.
+#[derive(Clone, Copy, Default)]
+pub struct MailSources<'a> {
+    /// Issues the tokens of verification mails; without it they cannot be sent.
+    pub signups: Option<&'a dyn SignupTokens>,
+    /// Checks comment mails again; without it they cannot be sent.
+    pub comments: Option<&'a dyn CommentMails>,
+}
+
 async fn deliver(
     mail: &mail_outbox::OutboxRow,
     transport: &dyn MailTransport,
     public_origin: &str,
-    signups: Option<&dyn SignupTokens>,
+    sources: MailSources<'_>,
 ) -> Result<Delivery, SendError> {
+    let signups = sources.signups;
     let rendered = match mail.kind.as_str() {
         KIND_SHARED => match SharedNotice::from_json(&mail.payload) {
             Some(notice) => render_shared(&notice, public_origin),
@@ -101,19 +114,32 @@ async fn deliver(
             }
         }
         KIND_SIGNUP_EXISTING => render_signup_existing(public_origin),
+        KIND_COMMENT_REPLY | KIND_COMMENT_THREADS => {
+            let (Some(notice), Some(comments)) =
+                (CommentNotice::from_json(&mail.payload), sources.comments)
+            else {
+                return unknown(mail.id);
+            };
+            match comments.still_due(&mail.kind, &notice).await? {
+                None | Some(0) => return Ok(Delivery::Dropped),
+                Some(_) if mail.kind == KIND_COMMENT_REPLY => {
+                    render_comment_reply(&notice, public_origin)
+                }
+                Some(count) => render_comment_threads(&notice, count, public_origin),
+            }
+        }
         _ => return unknown(mail.id),
     };
     transport.send(&mail.to_email, &rendered).await?;
     Ok(Delivery::Sent)
 }
 
-/// One round: every due mail once, then the cleanup of old rows. `signups` issues the tokens of
-/// verification mails; without it they cannot be sent.
+/// One round: every due mail once, then the cleanup of old rows.
 pub async fn run_outbox(
     db: &PgPool,
     transport: &dyn MailTransport,
     public_origin: &str,
-    signups: Option<&dyn SignupTokens>,
+    sources: MailSources<'_>,
     config: &OutboxConfig,
 ) -> Result<OutboxReport, office_db::Error> {
     let mut report = OutboxReport::default();
@@ -125,7 +151,7 @@ pub async fn run_outbox(
             break;
         }
         for mail in &due {
-            let outcome = deliver(mail, transport, public_origin, signups).await;
+            let outcome = deliver(mail, transport, public_origin, sources).await;
             let age = time::OffsetDateTime::now_utc() - mail.created_at;
             let expired = age >= config.give_up_after;
             match outcome {

@@ -24,6 +24,8 @@ pub struct ApiConfig {
     pub verify_rate: RateConfig,
     /// Per client address, opening public view links (no sign-in, so no per-actor limit).
     pub link_rate: RateConfig,
+    /// Per actor, comment writes (threads, replies, edits, deletions, resolving, anchors).
+    pub comment_rate: RateConfig,
     /// Whether sharing queues notification mail.
     pub mail: MailPolicy,
     /// Whether `POST /signup` is open, and its daily cap.
@@ -75,6 +77,12 @@ impl Default for ApiConfig {
             link_rate: RateConfig {
                 burst: 60,
                 per_second: 2.0,
+            },
+            // A lively discussion is a comment every few seconds; this keeps one account from
+            // flooding a document, its room and its owner's inbox.
+            comment_rate: RateConfig {
+                burst: 30,
+                per_second: 0.5,
             },
             mail: MailPolicy::default(),
             signup: SignupPolicy::default(),

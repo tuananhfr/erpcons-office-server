@@ -97,6 +97,13 @@ impl Documents {
         }
     }
 
+    /// Tells the room of `id` that comments changed, after the commit.
+    pub(super) fn live_comments(&self, id: Uuid, thread: Option<Uuid>) {
+        if let Some(rooms) = &self.live {
+            rooms.comments_changed(id, thread);
+        }
+    }
+
     /// Refuses a save while several members edit `id` and the caller is not their leader.
     pub(super) fn check_leader(&self, c: &Caller<'_>, id: Uuid) -> Result<(), DocError> {
         match &self.live {

@@ -13,4 +13,8 @@ pub trait LiveRooms: Send + Sync {
     /// `actor_id` saved `document` as `version` (committed), holding every room update up to
     /// `live_seq` (`X-Live-Seq`); the room trims its log if the actor leads it.
     fn saved(&self, document: Uuid, actor_id: &str, live_seq: u64, version: i32);
+
+    /// A comment thread of `document` changed (committed): members whose role allows comments hear
+    /// of it, without its content. `None`: several threads changed.
+    fn comments_changed(&self, document: Uuid, thread: Option<Uuid>);
 }

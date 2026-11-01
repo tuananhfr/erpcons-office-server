@@ -204,6 +204,22 @@ impl Room {
         }
     }
 
+    /// Tells the members whose role allows comments (edit or comment, editors waiting for a slot
+    /// included) that a thread changed; viewers and link holders never see comments.
+    pub fn comments_changed(&mut self, config: &LiveConfig, thread: Option<Uuid>) {
+        let frame = Frame::from(protocol::comments_changed(thread));
+        let targets: Vec<MemberId> = self
+            .members
+            .iter()
+            .filter(|(_, m)| m.allowed != Mode::View)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in targets {
+            self.deliver(id, Event::Send(frame.clone()));
+        }
+        self.settle(config);
+    }
+
     /// Saves count only from the leader while more than one member edits; one editor (or none)
     /// saves as without a room.
     pub fn may_save(&self, actor_id: &str) -> bool {

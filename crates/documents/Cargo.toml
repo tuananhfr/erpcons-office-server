@@ -16,6 +16,7 @@ office-identity.workspace = true
 office-mail.workspace = true
 office-storage.workspace = true
 aes-gcm.workspace = true
+async-trait.workspace = true
 base64.workspace = true
 hex.workspace = true
 ring.workspace = true

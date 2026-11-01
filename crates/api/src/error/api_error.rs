@@ -121,6 +121,7 @@ impl From<DocError> for ApiError {
             DocError::Contended => return Self::retry_after(ErrorCode::Unavailable, 1),
             DocError::TooManyPermissions => ErrorCode::TooManyPermissions,
             DocError::NotLeader => ErrorCode::NotLeader,
+            DocError::TooManyComments => ErrorCode::TooManyComments,
             // The window is a rolling day; an hour frees some of it for a typical sharer.
             DocError::TooManyRecipients => return Self::rate_limited(3600),
         };

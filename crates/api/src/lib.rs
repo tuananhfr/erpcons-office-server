@@ -110,6 +110,34 @@ pub fn router(state: AppState) -> Router {
             put(routes::link::enable).delete(routes::link::disable),
         )
         .route(
+            "/documents/{document_id}/comments",
+            get(routes::comments::list).post(routes::comments::create),
+        )
+        .route(
+            "/documents/{document_id}/comments/anchors",
+            patch(routes::comments::anchors),
+        )
+        .route(
+            "/documents/{document_id}/comments/{thread_id}",
+            get(routes::comments::get).delete(routes::comments::delete_thread),
+        )
+        .route(
+            "/documents/{document_id}/comments/{thread_id}/replies",
+            post(routes::comments::reply),
+        )
+        .route(
+            "/documents/{document_id}/comments/{thread_id}/resolve",
+            post(routes::comments::resolve),
+        )
+        .route(
+            "/documents/{document_id}/comments/{thread_id}/reopen",
+            post(routes::comments::reopen),
+        )
+        .route(
+            "/documents/{document_id}/comments/{thread_id}/comments/{comment_id}",
+            patch(routes::comments::edit).delete(routes::comments::delete_comment),
+        )
+        .route(
             "/documents/{document_id}/live-ticket",
             post(routes::live::ticket),
         )

@@ -1304,6 +1304,7 @@ dependencies = [
 name = "office-api"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "futures-util",
  "hex",
@@ -1348,6 +1349,7 @@ name = "office-documents"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "async-trait",
  "base64 0.23.1",
  "hex",
  "office-db",

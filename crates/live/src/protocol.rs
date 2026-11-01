@@ -3,7 +3,7 @@
 //! a client sends `presence` and `bye`. Co-editing (M4): a client sends `lock.acquire`,
 //! `lock.renew`, `lock.release`, `region.update`, `cursor` and `region.replay`; the server answers
 //! `lock.granted`, `lock.denied`, `ack`, `region.replayed`, and sends `locks`, `region.update`,
-//! `cursor`, `save.request` and `saved`.
+//! `cursor`, `save.request` and `saved`. Comments (M5): the server sends `comments.changed`.
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -231,6 +231,17 @@ pub(crate) fn region_update_head(region: &str, author: MemberId, payload: &str) 
 
 pub(crate) fn region_update_tail(seq: u64) -> String {
     format!(",\"seq\":{seq}}}")
+}
+
+#[derive(Serialize)]
+struct CommentsChanged {
+    /// `None`: several threads changed; read the list again.
+    thread_id: Option<uuid::Uuid>,
+}
+
+/// A comment thread changed; never its content.
+pub(crate) fn comments_changed(thread_id: Option<uuid::Uuid>) -> String {
+    encode("comments.changed", CommentsChanged { thread_id })
 }
 
 #[derive(Serialize)]

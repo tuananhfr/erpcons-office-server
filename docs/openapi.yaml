@@ -5,7 +5,7 @@ info:
   description: |
     Phases 0–2 of the online tier (ERPCONS OFFICE ONLINE V3.0 §05, §07, §08): documents, folders, immutable versions
     and their restore, trash, quota, sharing (people by email, a public view link, "Shared with me"), and the live room
-    of an open document (presence, phase 2 M3). Served on the
+    of an open document (presence, phase 2 M3; co-editing, M4) with its anchored comments (M5). Served on the
     site's origin under `/api/v1`, so browsers need no CORS.
 
     **Authentication.** Every operation except `/health`, the two `/link`, the three `/signup` operations and `openLive`
@@ -38,6 +38,9 @@ info:
     | `updatePermission` with `expires_at` (set, change or clear an expiry) | ✓ | | | |
     | `removePermission` of someone else's permission or invitation with `expires_at` set | ✓ | | | |
     | `putShareSettings`, move (`updateDocument` with `folder_id`), trash, restore, purge | ✓ | | | |
+    | `listComments`, `getCommentThread`, `createCommentThread`, `replyToCommentThread`, `updateCommentAnchors` | ✓ | ✓ | ✓ | |
+    | `updateComment`, `deleteComment` (the caller's own comments only; someone else's is 403) | ✓ | ✓ | ✓ | |
+    | `resolveCommentThread`, `reopenCommentThread`, `deleteCommentThread` | ✓ | ✓ | | |
 
     Nobody changes their own permission with `updatePermission` (403); leaving with `removePermission` stays open.
     Roles granted are at most `editor`. When an editor shares again with someone who already has a permission, the
@@ -68,14 +71,17 @@ info:
     **Rate limits.** Any authenticated operation may answer 429 `RATE_LIMITED` (retryable, with `Retry-After`): per
     client address (an IPv6 client counts by its /64), per actor, per client address for token checks that need a
     signature check (a token already verified and cached, or refused by its form alone, does not count), and per actor
-    for uploads and saves streaming at the same time (a few at once).
+    for uploads and saves streaming at the same time (a few at once), and per actor for comment writes (every comment
+    operation but the two reads: 30 at once, then one per 2 s; configurable).
 
     **Idempotency.** The create and purge operations take `Idempotency-Key` (1–100 chars); a repeat with the same key
     and body within 24 h returns the first response, a repeat with a different body answers 422
     `IDEMPOTENCY_MISMATCH`, a repeat while the first is still running 503 `UNAVAILABLE` (retryable). Restore, trash and save need no key: repeating them
     is harmless (restoring an active item returns it, trashing a trashed one is a no-op, a repeated save answers the
     version it made, see `saveContent`). Sharing needs no key either: adding a permission someone already has with the
-    same role changes nothing and sends no second email.
+    same role changes nothing and sends no second email. Of the comment operations, `createCommentThread` and
+    `replyToCommentThread` take the key; resolving, reopening and re-placing anchors are harmless to repeat, and
+    editing a comment twice leaves it as the first did (a second delete answers 404).
 
     **Email.** When SMTP is configured, `addPermissions` with `notify` queues an email ("shared with you", in
     Vietnamese, with the sharer's name (cut to 60 characters in the subject) and verified email, the optional message
@@ -87,6 +93,35 @@ info:
     sharer (configured, default 100), per recipient address (10, whoever sends them) and for the whole server
     (configured, default 2000). Past any of them the sharing still succeeds and appears in "Shared with me", but no
     email is queued, and `mail_skipped` counts them.
+
+    Comment emails (M5), with SMTP configured: in Vietnamese, never with anyone's words (no comment body), with the
+    title only when the server is configured to include it, and a link that opens the thread
+    (`/<editor>/?doc=<document_id>&comment=<thread_id>`, `<editor>` being `van-ban`, `bang-tinh`, `trinh-chieu` or
+    `pdf`). (a) A reply reaches everyone else who has written in the thread (never the replier), at most one waiting
+    per person and thread. (b) New threads started by others on a document reach its owner, gathered into one email
+    per document sent 15 minutes after the first (it counts every new thread up to when it is sent). Only to an account
+    with a verified email that may still read the comments (owner, editor or commenter, document not in the trash),
+    checked when the email is queued and again when it is sent, so someone who lost access in between gets nothing.
+    They share the per-sender and server caps above, and one address gets at most 50 comment emails per rolling 24 h.
+
+    **Comments** (plan-m5). A thread is a first comment and its replies, anchored to a place in the document by the
+    editor: `anchor` is a JSON object the editors define (stable region id, position in it, soft anchor), at most
+    8 KiB as compact JSON, stored as sent and never read by the server; `region` (optional, 1–256 bytes, no control
+    characters) is the region id, kept apart for the editors; `created_version` is the version the anchor was taken on
+    (the current one unless the request names an earlier one). Status: `open`, `resolved` (by the owner or an editor,
+    with who and when) or `orphaned` (the editor could not find the anchor again; still listed). Comments are never
+    written into the file. Owner, editors and commenters read, start threads and reply; viewers and link holders do
+    not see comments at all (403 `FORBIDDEN` for a viewer, who can see the document; 404 for anyone who cannot). A
+    comment's author edits and deletes it (a deleted comment keeps its place with `body` `null`; a thread left with no
+    words is deleted). Owner and editors resolve, reopen and delete whole threads. Editors report where they placed
+    threads again with `updateCommentAnchors` (owner, editors and commenters, since any of them may open a newer
+    version). In the trash the owner still reads the comments, and every change answers 404 like any change of a
+    trashed document. A purge deletes the threads. Bounds: a comment is 1–10 000 characters (not only blanks); 2000
+    threads per document and 200 comments per thread (422 `TOO_MANY_COMMENTS`); 200 threads per anchor batch. Access
+    is read from the database on every request, so a removed permission is refused at the next one. Live room members
+    whose role allows comments hear `comments.changed` after every committed change. Logs and audit rows never hold a
+    body, an anchor or a name; audit rows (`comment.create`, `.reply`, `.edit`, `.delete`, `.resolve`, `.reopen`,
+    `.thread_delete`, `.anchors`) name the document only.
 
     **Sign-up** (no sign-in). Office keeps no accounts: a sign-up becomes a PI ID account. `createSignup` checks the
     form, stores the address, the name and a `$2y$` bcrypt hash of the password (never the password), and queues a
@@ -126,6 +161,7 @@ info:
     | `region.replayed` | End of the answer to `region.replay`: `since`, `seq` |
     | `save.request` | To the leader only: the room's log overflowed, save now |
     | `saved` | The leader saved: `saved_seq`, `version` |
+    | `comments.changed` | A comment thread changed (`thread_id`; `null` when several did, e.g. an anchor batch): read it again with `getCommentThread` or `listComments`. Only to members whose role allows comments (owner, editor, commenter); never any content |
     | `bye` | The server ends the session (`reason`), then closes |
     | `error` | A message was refused (`code`, and `cid` when the message had one); fatal ones are followed by a close |
 
@@ -240,6 +276,8 @@ tags:
     description: Permissions by email, share settings, the public view link and "Shared with me".
   - name: live
     description: The live room of an open document (presence, region co-editing).
+  - name: comments
+    description: Anchored comment threads of a document (M5).
   - name: signup
     description: Self sign-up for a free PI ID account, verified by email.
   - name: ops
@@ -722,6 +760,249 @@ paths:
         '422': { $ref: '#/components/responses/Unprocessable' }
         '428': { $ref: '#/components/responses/PreconditionRequired' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /documents/{document_id}/comments:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    get:
+      operationId: listComments
+      tags: [comments]
+      summary: The document's comment threads, oldest first, each with all its comments (owner, editor, commenter)
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/CommentStatus' }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: A page of threads.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommentThreads' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+    post:
+      operationId: createCommentThread
+      tags: [comments]
+      summary: Start a thread at an anchor with its first comment (owner, editor, commenter)
+      description: The document's owner gets the batched "new comments" email (see **Email**) when someone else starts one.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [anchor, body]
+              properties:
+                anchor: { $ref: '#/components/schemas/CommentAnchor' }
+                region: { $ref: '#/components/schemas/CommentRegion' }
+                version:
+                  type: [integer, 'null']
+                  minimum: 1
+                  description: The version the anchor was taken on; at most the current one, which it defaults to.
+                body: { $ref: '#/components/schemas/CommentBody' }
+      responses:
+        '201':
+          description: Started.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommentThread' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/CommentUnprocessable' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /documents/{document_id}/comments/anchors:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+    patch:
+      operationId: updateCommentAnchors
+      tags: [comments]
+      summary: Report where the editor placed threads again (owner, editor, commenter)
+      description: |
+        Each update changes only the fields it holds. `status` `orphaned` marks a thread the editor could not place,
+        `open` one it placed again; a resolved thread stays `resolved` (its anchor and region still change). Threads
+        not of this document, or gone, are skipped. Answers how many threads changed; the room hears one
+        `comments.changed` with `thread_id` `null`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [updates]
+              properties:
+                updates:
+                  type: array
+                  minItems: 1
+                  maxItems: 200
+                  items:
+                    type: object
+                    required: [thread_id]
+                    properties:
+                      thread_id: { $ref: '#/components/schemas/Id' }
+                      anchor: { $ref: '#/components/schemas/CommentAnchor' }
+                      region:
+                        type: [string, 'null']
+                        minLength: 1
+                        description: The new region id; `null` clears it, absent keeps it.
+                      status: { type: string, enum: [open, orphaned] }
+      responses:
+        '200':
+          description: Applied.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [updated]
+                properties:
+                  updated: { type: integer, minimum: 0 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /documents/{document_id}/comments/{thread_id}:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/ThreadId'
+    get:
+      operationId: getCommentThread
+      tags: [comments]
+      summary: One thread with all its comments (owner, editor, commenter), for links that open a thread
+      responses:
+        '200':
+          description: The thread.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommentThread' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      operationId: deleteCommentThread
+      tags: [comments]
+      summary: Delete a whole thread with its comments (owner, editor)
+      responses:
+        '204': { description: Deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /documents/{document_id}/comments/{thread_id}/replies:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/ThreadId'
+    post:
+      operationId: replyToCommentThread
+      tags: [comments]
+      summary: Reply in a thread, a resolved one included, which stays resolved (owner, editor, commenter)
+      description: Everyone else who has written in the thread gets the reply email (see **Email**).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { $ref: '#/components/schemas/CommentBody' }
+      responses:
+        '201':
+          description: Replied.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Comment' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/CommentUnprocessable' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /documents/{document_id}/comments/{thread_id}/resolve:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/ThreadId'
+    post:
+      operationId: resolveCommentThread
+      tags: [comments]
+      summary: Mark a thread resolved (owner, editor); one already resolved keeps who resolved it
+      responses:
+        '200':
+          description: The thread.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommentThread' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /documents/{document_id}/comments/{thread_id}/reopen:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/ThreadId'
+    post:
+      operationId: reopenCommentThread
+      tags: [comments]
+      summary: Open a resolved thread again, as `open` (owner, editor); any other thread is returned unchanged
+      responses:
+        '200':
+          description: The thread.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommentThread' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /documents/{document_id}/comments/{thread_id}/comments/{comment_id}:
+    parameters:
+      - $ref: '#/components/parameters/DocumentId'
+      - $ref: '#/components/parameters/ThreadId'
+      - name: comment_id
+        in: path
+        required: true
+        schema: { $ref: '#/components/schemas/Id' }
+    patch:
+      operationId: updateComment
+      tags: [comments]
+      summary: Change the words of one's own comment (its author, while owner, editor or commenter)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { $ref: '#/components/schemas/CommentBody' }
+      responses:
+        '200':
+          description: Changed; `edited_at` is set.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Comment' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+    delete:
+      operationId: deleteComment
+      tags: [comments]
+      summary: Delete one's own comment (its author); a deleted one answers 404
+      description: The comment keeps its place with `body` `null` and `deleted_at`; a thread left with no words is deleted.
+      responses:
+        '204': { description: Deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
   /documents/{document_id}/live-ticket:
     parameters:
       - $ref: '#/components/parameters/DocumentId'
@@ -1234,6 +1515,11 @@ components:
       required: true
       description: A version's `version` number.
       schema: { type: integer, minimum: 1 }
+    ThreadId:
+      name: thread_id
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Id' }
     LinkToken:
       name: X-Link-Token
       in: header
@@ -1438,6 +1724,64 @@ components:
               description: >-
                 Emails not queued: the caller has no verified email, or a daily cap was reached (see **Email**). 0
                 without `notify` or SMTP.
+    CommentStatus:
+      type: string
+      enum: [open, resolved, orphaned]
+      description: '`orphaned`: the editor could not find the anchor again.'
+    CommentAnchor:
+      type: object
+      description: Defined by the editors (region id, position in it, soft anchor); at most 8 KiB as compact JSON. Stored as sent.
+      additionalProperties: true
+    CommentRegion:
+      type: [string, 'null']
+      minLength: 1
+      description: The anchor's stable region id; 1–256 bytes, no control characters.
+    CommentBody:
+      type: string
+      minLength: 1
+      maxLength: 10000
+      description: 1–10 000 characters, not only blanks, no NUL.
+    Comment:
+      type: object
+      required: [id, thread_id, author_name, mine, body, created_at, edited_at, deleted_at]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        thread_id: { $ref: '#/components/schemas/Id' }
+        author_name: { type: string, description: The author's current display name (may be empty). }
+        mine: { type: boolean, description: Written by the caller, who may edit and delete it. }
+        body: { type: [string, 'null'], description: '`null` once deleted.' }
+        created_at: { type: string, format: date-time }
+        edited_at: { type: [string, 'null'], format: date-time }
+        deleted_at: { type: [string, 'null'], format: date-time }
+    CommentThread:
+      type: object
+      required: [id, document_id, anchor, region, created_version, status, created_by_name, mine, created_at, updated_at, resolved_by_name, resolved_at, comments]
+      properties:
+        id: { $ref: '#/components/schemas/Id' }
+        document_id: { $ref: '#/components/schemas/Id' }
+        anchor: { $ref: '#/components/schemas/CommentAnchor' }
+        region: { $ref: '#/components/schemas/CommentRegion' }
+        created_version: { type: integer, minimum: 1, description: The version the anchor was taken on. }
+        status: { $ref: '#/components/schemas/CommentStatus' }
+        created_by_name: { type: string }
+        mine: { type: boolean, description: Started by the caller. }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time, description: Last change to the thread or any of its comments. }
+        resolved_by_name: { type: [string, 'null'] }
+        resolved_at: { type: [string, 'null'], format: date-time }
+        comments:
+          type: array
+          description: The first comment, then the replies, oldest first; deleted ones keep their place.
+          items: { $ref: '#/components/schemas/Comment' }
+    CommentThreads:
+      type: object
+      required: [threads, next_cursor, can_resolve]
+      properties:
+        threads:
+          type: array
+          items: { $ref: '#/components/schemas/CommentThread' }
+        next_cursor: { type: [string, 'null'] }
+        can_resolve: { type: boolean, description: The caller may resolve, reopen and delete threads (owner, editor). }
     Version:
       type: object
       required: [version, size, sha256, author_name, created_at]
@@ -1651,6 +1995,16 @@ components:
         v: { const: 1 }
         saved_seq: { type: integer }
         version: { type: integer, description: The version the save made. }
+    LiveCommentsChanged:
+      type: object
+      required: [type, v, thread_id]
+      properties:
+        type: { const: comments.changed }
+        v: { const: 1 }
+        thread_id:
+          type: [string, 'null']
+          format: uuid
+          description: The thread that changed; `null` when several did.
     LiveServerMessage:
       oneOf:
         - $ref: '#/components/schemas/LiveHello'
@@ -1665,6 +2019,7 @@ components:
         - $ref: '#/components/schemas/LiveRegionReplayed'
         - $ref: '#/components/schemas/LiveSaveRequest'
         - $ref: '#/components/schemas/LiveSaved'
+        - $ref: '#/components/schemas/LiveCommentsChanged'
         - $ref: '#/components/schemas/LiveBye'
         - $ref: '#/components/schemas/LiveError'
       discriminator: { propertyName: type }
@@ -1755,6 +2110,7 @@ components:
             - SIGNUP_CLOSED
             - SIGNUP_DAILY_LIMIT
             - NOT_LEADER
+            - TOO_MANY_COMMENTS
         message_vi: { type: string }
         request_id: { type: string }
         retryable: { type: boolean }
@@ -1814,6 +2170,11 @@ components:
           schema: { $ref: '#/components/schemas/Error' }
     Unprocessable:
       description: '`UNSUPPORTED_TYPE`, `INVALID_SIGNATURE`, `FOLDER_CYCLE`, `INVALID_REQUEST`, `IDEMPOTENCY_MISMATCH` or `TOO_MANY_PERMISSIONS`.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    CommentUnprocessable:
+      description: '`INVALID_REQUEST`, `IDEMPOTENCY_MISMATCH` or `TOO_MANY_COMMENTS` (2000 threads per document, 200 comments per thread).'
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }

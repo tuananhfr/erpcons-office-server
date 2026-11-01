@@ -141,6 +141,11 @@ impl ServerConfig {
                 "ERPCONS_RATE_LINK_PER_SEC",
                 defaults.link_rate,
             )?,
+            comment_rate: vars.rate(
+                "ERPCONS_RATE_COMMENT_BURST",
+                "ERPCONS_RATE_COMMENT_PER_SEC",
+                defaults.comment_rate,
+            )?,
             signup_rate: vars.rate(
                 "ERPCONS_RATE_SIGNUP_BURST",
                 "ERPCONS_RATE_SIGNUP_PER_SEC",

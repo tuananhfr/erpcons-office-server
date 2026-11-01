@@ -30,6 +30,7 @@ tungstenite.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 futures-util = { workspace = true, features = ["sink"] }
 office-db = { workspace = true, features = ["testing"] }
 office-documents = { workspace = true, features = ["testing"] }
