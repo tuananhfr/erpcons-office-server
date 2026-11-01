@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use office_api::LiveConfig;
 use serde_json::json;
+use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
     live::shared_document,
@@ -185,4 +186,18 @@ async fn link_holders_take_at_most_part_of_a_room() {
     assert_eq!(ended.code, Some(4029));
     let (_wc, hello) = join(&app, &c, &doc).await;
     assert_eq!(hello["mode"], "view");
+}
+
+#[tokio::test]
+async fn a_binary_frame_gets_an_error() {
+    let Some(app) = TestApp::spawn().await else {
+        return;
+    };
+    let (a, _, _, doc, _) = shared_document(&app).await;
+    let (mut wa, _) = join(&app, &a, &doc).await;
+    wa.send_frame(Message::Binary(vec![1, 2, 3].into())).await;
+    assert_eq!(wa.next_of("error").await["code"], "INVALID_MESSAGE");
+    wa.send_json(&json!({ "type": "presence", "v": 1, "state": "idle" }))
+        .await;
+    assert_eq!(wa.next_of("presence").await["members"][0]["state"], "idle");
 }

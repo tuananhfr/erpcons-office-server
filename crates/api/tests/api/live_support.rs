@@ -141,6 +141,11 @@ impl Ws {
         self.send_text(value.to_string()).await;
     }
 
+    /// Sends a frame as is: binary, ping, pong.
+    pub async fn send_frame(&mut self, frame: Message) {
+        self.stream.send(frame).await.expect("send");
+    }
+
     /// Reads until the server closes; skips other messages.
     pub async fn ended(&mut self) -> Ended {
         let mut said = None;

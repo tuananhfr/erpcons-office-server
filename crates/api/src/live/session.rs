@@ -157,18 +157,18 @@ async fn on_frame(
     frame: Message,
     grace: Duration,
 ) -> Option<End> {
-    let text = match frame {
+    let message = match frame {
         Message::Close(_) => return Some(End::Gone),
         Message::Pong(_) => return None,
-        Message::Text(text) => Some(text),
-        Message::Binary(_) | Message::Ping(_) => None,
+        Message::Ping(_) => None,
+        Message::Text(text) => Some(protocol::parse(text.as_str())),
+        Message::Binary(_) => Some(Err(LiveErrorCode::InvalidMessage)),
     };
     if !rate.check(std::time::Instant::now()) {
         let _ = send(socket, protocol::error(LiveErrorCode::RateLimited), grace).await;
         return Some(End::Bye(ByeReason::RateLimited));
     }
-    let text = text?;
-    match protocol::parse(text.as_str()) {
+    match message? {
         Ok(ClientMessage::Presence(state)) => {
             membership.set_state(state);
             None
