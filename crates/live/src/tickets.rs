@@ -9,7 +9,7 @@
 //! keys or networks so never pushes out a light user's ticket.
 use std::{
     cmp::Reverse,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::IpAddr,
     sync::{Mutex, PoisonError},
     time::{Duration, Instant},
@@ -107,30 +107,35 @@ impl<T> Tickets<T> {
         let mut store = self.store.lock().unwrap_or_else(PoisonError::into_inner);
         // Full passes: the store holds at most `max` entries, and issuing is rate limited.
         store.entries.retain(|_, e| e.expires > now);
-        let entries = &mut store.entries;
+        let entries = &store.entries;
         let holder = Group::Holder(holder_key);
         let from = Group::Network(network);
-        make_room(entries, holder, self.per_holder, |e| {
-            e.holder_key == holder_key
-        })?;
+        // Victims are only chosen here and removed once every cap made room: a refusal evicts
+        // nothing.
+        let mut evict = HashSet::new();
+        let mut make_room = |requester, limit, in_cap: &dyn Fn(&Entry<T>) -> bool| {
+            choose_victims(entries, &mut evict, requester, limit, in_cap)
+        };
+        make_room(holder, self.per_holder, &|e| e.holder_key == holder_key)?;
         // One holder takes at most a quarter of its network's share, one network an eighth of an
         // owner's links: filling a shared cap takes several of them.
-        make_room(entries, holder, (self.per_address / 4).max(1), |e| {
+        make_room(holder, (self.per_address / 4).max(1), &|e| {
             e.holder_key == holder_key && e.network == network
         })?;
         if let Some(owner) = link_owner {
-            make_room(entries, holder, (self.per_owner / 8).max(1), |e| {
+            make_room(holder, (self.per_owner / 8).max(1), &|e| {
                 e.owner.as_deref() == Some(owner) && e.network == network
             })?;
         }
-        make_room(entries, holder, self.per_address, |e| e.network == network)?;
+        make_room(holder, self.per_address, &|e| e.network == network)?;
         // Across networks fairness counts networks: a link holder's key is cheap to multiply.
         if let Some(owner) = link_owner {
-            make_room(entries, from, self.per_owner, |e| {
-                e.owner.as_deref() == Some(owner)
-            })?;
+            make_room(from, self.per_owner, &|e| e.owner.as_deref() == Some(owner))?;
         }
-        make_room(entries, from, self.max, |_| true)?;
+        make_room(from, self.max, &|_| true)?;
+        for key in evict {
+            store.entries.remove(&key);
+        }
         let issued = store.next;
         store.next += 1;
         store.entries.insert(
@@ -200,20 +205,24 @@ impl<'a> Group<'a> {
     }
 }
 
-/// Evicts until one more ticket fits under `limit` among the entries `in_cap`: the oldest ticket of
-/// the heaviest other group while it holds at least two more than `requester`, else the
-/// requester's own oldest; `Full` when the requester has none there.
-fn make_room<T>(
-    entries: &mut HashMap<[u8; 32], Entry<T>>,
-    requester: Group<'_>,
+/// Adds to `evict` until one more ticket fits under `limit` among the entries `in_cap` not yet in
+/// it: the oldest ticket of the heaviest other group while it holds at least two more than
+/// `requester`, else the requester's own oldest; `Full` when the requester has none there.
+fn choose_victims<'a, T>(
+    entries: &'a HashMap<[u8; 32], Entry<T>>,
+    evict: &mut HashSet<[u8; 32]>,
+    requester: Group<'a>,
     limit: usize,
-    in_cap: impl Fn(&Entry<T>) -> bool,
+    in_cap: &dyn Fn(&Entry<T>) -> bool,
 ) -> Result<(), TicketError> {
     loop {
         // Per group: tickets in the cap, and its oldest (issue number, key).
         let mut groups: HashMap<Group<'_>, (usize, (u64, [u8; 32]))> = HashMap::new();
         let mut total = 0;
-        for (key, e) in entries.iter().filter(|(_, e)| in_cap(e)) {
+        let left = entries
+            .iter()
+            .filter(|(key, e)| !evict.contains(*key) && in_cap(e));
+        for (key, e) in left {
             total += 1;
             let slot = groups
                 .entry(requester.of(e))
@@ -237,7 +246,7 @@ fn make_room<T>(
             (_, Some(own)) => own,
             _ => return Err(TicketError::Full),
         };
-        entries.remove(&(victim.1).1);
+        evict.insert((victim.1).1);
     }
 }
 
@@ -480,6 +489,50 @@ mod tests {
             Err(TicketError::Full),
             "nobody holds more than a newcomer would"
         );
+    }
+
+    /// Every outstanding ticket with its holder key, issue number and expiry, in a fixed order.
+    fn snapshot<T>(tickets: &Tickets<T>) -> Vec<([u8; 32], String, u64, Instant)> {
+        let store = tickets.store.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut all: Vec<_> = store
+            .entries
+            .iter()
+            .map(|(k, e)| (*k, e.holder_key.clone(), e.issued, e.expires))
+            .collect();
+        all.sort();
+        all
+    }
+
+    #[test]
+    fn a_refused_request_evicts_nothing() {
+        // A network of 8 holds "x" at its quarter (2) and six others; the owner's 2 links are taken
+        // from two other networks.
+        let tickets = Tickets::new(&LiveConfig {
+            ticket_ttl: TTL,
+            max_tickets_per_address: 8,
+            max_link_tickets_per_owner: 2,
+            ..LiveConfig::default()
+        });
+        let doc = Uuid::new_v4();
+        let now = Instant::now();
+        let issue = |key: &str, address: &str, owner: Option<&str>| {
+            tickets
+                .issue(doc, ip(address), key, owner, (), now)
+                .expect("ticket")
+        };
+        let x = [issue("x", "10.0.0.9", None), issue("x", "10.0.0.9", None)];
+        for key in ["b", "c", "d", "e", "f", "g"] {
+            issue(key, "10.0.0.9", None);
+        }
+        issue("link:1", "10.0.0.1", Some("owner"));
+        issue("link:2", "10.0.0.2", Some("owner"));
+        let before = snapshot(&tickets);
+        assert_eq!(
+            tickets.issue(doc, ip("10.0.0.9"), "link:9", Some("owner"), (), now),
+            Err(TicketError::Full)
+        );
+        assert_eq!(snapshot(&tickets), before, "x keeps both tickets");
+        assert!(held(&tickets, &x[0]));
     }
 
     #[test]

@@ -726,8 +726,17 @@ paths:
         one client network; client networks for the owner's links and the whole server) only while that party holds
         at least two more there than the requester; else the requester's own oldest there. When the requester holds
         none there, it is refused: 503 `UNAVAILABLE` with `Retry-After: 1` (tickets are spent or lapse within
-        30 s). Spreading tickets over many holders or networks so never pushes out anyone else's. A request whose
-        client address is unknown answers 503.
+        30 s). Every cap makes room before any ticket is evicted: a refused request evicts nothing. Spreading tickets
+        over many holders or networks so never pushes out anyone else's. A request whose client address is unknown
+        answers 503.
+
+        Issuing is rate limited (429 `RATE_LIMITED`, `Retry-After`) per client address (an IPv6 client by its /64; 300
+        at once, then 30 a second), per account (120, then 10 a second) and, with `X-Link-Token`, per client address
+        for public links (60, then 2 a second). Known residual risk: when every network in a cap holds a single
+        ticket, a newcomer is refused rather than pushing anyone out. Keeping one owner's public links full that way
+        takes 300 distinct client networks (IPv4 addresses or IPv6 /56) asking again within every 30 s, the whole
+        server 10 000; until then only those links (or new tickets server-wide) answer 503, and existing tickets and
+        connections are untouched.
       parameters:
         - name: X-Link-Token
           in: header
