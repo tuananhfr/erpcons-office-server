@@ -83,6 +83,9 @@ pub(crate) struct Member {
     pub state: PresenceState,
     /// An `Event::Recheck` is queued and not yet taken up.
     pub recheck_queued: bool,
+    /// The `since` of this connection's last successful `region.replay`; updates wait for one, so
+    /// a cid from before what the room remembers can never pass as new.
+    pub synced: Option<u64>,
     pub address: Option<IpAddr>,
     pub sender: mpsc::Sender<Event>,
 }

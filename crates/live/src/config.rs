@@ -44,7 +44,7 @@ pub struct LiveConfig {
     /// fair share shed their oldest updates (their leaders are asked to save), then updates wait.
     pub max_total_log_bytes: usize,
     /// When the node budget is full, a room with nothing unsaved and no update for this long gives
-    /// back its remembered ids' reserve; a client resending after that could apply twice.
+    /// back its remembered ids' reserve; a client resending after that must replay first.
     pub idle_log_release: Duration,
     /// Messages a connection may send at once, then refilled at `messages_per_second`.
     pub message_burst: u32,

@@ -18,7 +18,7 @@ use crate::{
     ByeReason, Event, Frame, LiveConfig, LockTable, MemberId, Mode, Notice, Participant,
     PresenceState,
     frame::LocksSnapshot,
-    log::RoomLog,
+    log::{Acked, RoomLog, actor_tag},
     member::Member,
     palette,
     protocol::{self, Hello, Limits, MemberView},
@@ -41,6 +41,9 @@ pub(crate) struct Room {
     locks_changed: bool,
     /// When the last update was logged.
     last_update: Option<Instant>,
+    /// The newest seq whose cid the room may have forgotten (its start, a release, the cap): a
+    /// replay from before it cannot tell a resend from a new update.
+    forgotten: u64,
     /// Keys `person`: the same account's connections share one, unlinkable to the account or to
     /// any other room.
     person_key: hmac::Key,
@@ -60,6 +63,7 @@ impl Room {
             pending_announce: false,
             locks_changed: false,
             last_update: None,
+            forgotten: base,
             person_key: hmac::Key::new(hmac::HMAC_SHA256, &random_salt()),
         }
     }
@@ -116,6 +120,7 @@ impl Room {
                 slot,
                 state: PresenceState::Active,
                 recheck_queued: false,
+                synced: None,
                 address,
                 sender,
             },
@@ -239,6 +244,27 @@ impl Room {
 
     pub fn locks(&self) -> &LockTable {
         &self.locks
+    }
+
+    /// The room no longer remembers `lost`. A member synced before one of them that another
+    /// connection of its account sent may resend it unrecognised, so it must replay again.
+    fn forget(&mut self, lost: &[Acked]) {
+        let Some(newest) = lost.iter().map(|a| a.seq).max() else {
+            return;
+        };
+        self.forgotten = self.forgotten.max(newest);
+        for (id, member) in &mut self.members {
+            let (Some(since), Some(actor)) = (member.synced, member.participant.actor_id()) else {
+                continue;
+            };
+            let tag = actor_tag(actor);
+            if lost
+                .iter()
+                .any(|a| a.actor == tag && a.member != *id && a.seq > since)
+            {
+                member.synced = None;
+            }
+        }
     }
 
     /// Removes the member and what it held, without telling anyone yet.

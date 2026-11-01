@@ -27,7 +27,15 @@ struct Client {
     hello: Value,
 }
 
+/// Joins, then replays from the stored content as a client does before it edits.
 fn join(hub: &Arc<Hub>, doc: Uuid, who: Participant, allowed: Mode) -> Client {
+    let client = join_unsynced(hub, doc, who, allowed);
+    let saved = client.hello["saved_seq"].as_u64().expect("saved_seq");
+    client.replay(saved);
+    client
+}
+
+fn join_unsynced(hub: &Arc<Hub>, doc: Uuid, who: Participant, allowed: Mode) -> Client {
     let address = Some(IpAddr::from([10, 0, 0, 1]));
     let (membership, events) = hub.join(doc, who, allowed, address).expect("join");
     let mut client = Client {
@@ -522,7 +530,7 @@ fn a_save_older_than_the_log_asks_again() {
 fn tight(c: &mut LiveConfig) {
     c.max_total_log_bytes = 16_000;
     c.max_log_bytes = 160_000;
-    c.max_acked_cids = 64;
+    c.max_acked_cids = 48;
 }
 
 /// Two editors in `doc`, the second leading, holding lock `p`.
@@ -550,7 +558,7 @@ fn the_node_sheds_a_room_above_its_share_and_keeps_its_cids() {
         assert_eq!(a.update("p", &format!("u{n}"), &payload)["type"], "ack");
     }
     assert_eq!(
-        a.replay(start)[0]["code"],
+        leader.replay(start)[0]["code"],
         "REPLAY_GONE",
         "the heavy log shed"
     );
@@ -802,4 +810,133 @@ fn a_room_opened_again_numbers_above_the_last_one() {
     assert!(base >= last, "{base} < {last}");
     assert_eq!(b.replay(last - 1)[0]["code"], "REPLAY_GONE");
     assert!(base < (1u64 << 53), "exact in JavaScript");
+}
+
+#[test]
+fn a_cid_resent_after_the_room_forgot_it_is_never_taken_as_new() {
+    let hub = hub(|c| {
+        tight(c);
+        c.idle_log_release = Duration::ZERO;
+    });
+    let doc = Uuid::new_v4();
+    let (mut a, mut leader) = pair(&hub, doc, ["a", "l"]);
+    let seen = a.hello["seq"].as_u64().expect("seq");
+    let seq = a.update("p", "lost", "x")["seq"].as_u64().expect("seq");
+    hub.saved(doc, "l", seq, 2);
+    // The page never got that ack: its connection dropped.
+    drop(a);
+    // Other rooms fill the node, so saved, idle rooms (this one first) give back their cids.
+    let mut others = Vec::new();
+    for n in 0..5 {
+        let other = Uuid::new_v4();
+        let (mut editor, rest) = pair(&hub, other, ["e", "m"]);
+        let at = editor.update("p", &format!("c{n}"), "x")["seq"]
+            .as_u64()
+            .expect("seq");
+        hub.saved(other, "m", at, 2);
+        others.push((editor, rest));
+    }
+
+    let mut silent = join_unsynced(&hub, doc, user("a"), Mode::Edit);
+    silent.acquire("p", "relock");
+    silent.drain();
+    leader.drain();
+    let answer = silent.update("p", "lost", "x");
+    assert_eq!(answer["code"], "REPLAY_GONE", "no replay yet: {answer}");
+    assert_eq!(answer["cid"], "lost");
+    assert!(
+        leader.all_of("region.update").is_empty(),
+        "not applied again"
+    );
+    drop(silent);
+
+    let mut again = join_unsynced(&hub, doc, user("a"), Mode::Edit);
+    again.acquire("p", "relock");
+    again.drain();
+    leader.drain();
+    // Resent right behind a replay the room cannot answer.
+    let gone = again.replay(seen);
+    assert_eq!(gone[0]["code"], "REPLAY_GONE");
+    let answer = again.update("p", "lost", "x");
+    assert_eq!(answer["code"], "REPLAY_GONE", "{answer}");
+    assert_eq!(answer["saved_seq"], seq);
+    assert!(
+        leader.all_of("region.update").is_empty(),
+        "not applied again"
+    );
+
+    // Reloaded and replayed from the save: its edits go out as new updates.
+    let saved = gone[0]["saved_seq"].as_u64().expect("saved_seq");
+    assert_eq!(
+        again.replay(saved).last().expect("end")["type"],
+        "region.replayed"
+    );
+    assert_eq!(again.update("p", "new", "x")["type"], "ack");
+}
+
+#[test]
+fn a_member_synced_before_a_cid_the_room_dropped_replays_again() {
+    let hub = hub(|c| c.max_acked_cids = 2);
+    let doc = Uuid::new_v4();
+    let (mut a, mut leader) = pair(&hub, doc, ["a", "l"]);
+    let start = a.hello["saved_seq"].as_u64().expect("saved_seq");
+    a.update("p", "lost", "x");
+    drop(a);
+    let mut again = join_unsynced(&hub, doc, user("a"), Mode::Edit);
+    let replayed = again.replay(start);
+    assert_eq!(replayed.last().expect("end")["type"], "region.replayed");
+    again.acquire("p", "relock");
+    // Before its resend arrives, the room's cap drops the cid.
+    leader.acquire("q", "lq");
+    leader.update("q", "l1", "y");
+    leader.update("q", "l2", "y");
+    again.drain();
+    leader.drain();
+    let answer = again.update("p", "lost", "x");
+    assert_eq!(answer["code"], "REPLAY_GONE", "{answer}");
+    assert!(
+        leader.all_of("region.update").is_empty(),
+        "not applied again"
+    );
+    assert_eq!(
+        leader.update("q", "l3", "z")["type"],
+        "ack",
+        "only its own cids went: no new replay"
+    );
+
+    let late = join_unsynced(&hub, doc, user("x"), Mode::View);
+    assert_eq!(
+        late.replay(start)[0]["code"],
+        "REPLAY_GONE",
+        "from before a forgotten cid, though the log holds it"
+    );
+}
+
+#[test]
+fn a_room_that_drops_unsaved_cids_asks_for_a_save() {
+    let hub = hub(|c| c.max_acked_cids = 2);
+    let doc = Uuid::new_v4();
+    let (mut a, mut leader) = pair(&hub, doc, ["a", "l"]);
+    let start = a.hello["saved_seq"].as_u64().expect("saved_seq");
+    a.update("p", "u1", "x");
+    a.update("p", "u2", "x");
+    assert!(leader.all_of("save.request").is_empty());
+    let last = a.update("p", "u3", "x")["seq"].as_u64().expect("seq");
+    assert_eq!(
+        leader.all_of("save.request").len(),
+        1,
+        "a replay from the save is gone"
+    );
+    let late = join_unsynced(&hub, doc, user("x"), Mode::View);
+    assert_eq!(late.replay(start)[0]["code"], "REPLAY_GONE");
+
+    hub.saved(doc, "l", last, 2);
+    let fresh = join_unsynced(&hub, doc, user("y"), Mode::Edit);
+    let saved = fresh.hello["saved_seq"].as_u64().expect("saved_seq");
+    assert_eq!(saved, last);
+    assert_eq!(
+        fresh.replay(saved).last().expect("end")["type"],
+        "region.replayed"
+    );
+    assert!(leader.all_of("save.request").is_empty(), "not asked again");
 }

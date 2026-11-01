@@ -327,8 +327,10 @@ pub(crate) fn error_for(code: LiveErrorCode, cid: &str) -> String {
 }
 
 #[derive(Serialize)]
-struct ReplayGone {
+struct ReplayGone<'a> {
     code: LiveErrorCode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cid: Option<&'a str>,
     saved_seq: u64,
     saved_version: Option<i32>,
 }
@@ -336,6 +338,18 @@ struct ReplayGone {
 pub(crate) fn replay_gone(saved_seq: u64, saved_version: Option<i32>) -> String {
     let body = ReplayGone {
         code: LiveErrorCode::ReplayGone,
+        cid: None,
+        saved_seq,
+        saved_version,
+    };
+    encode("error", body)
+}
+
+/// `REPLAY_GONE` refusing the update `cid`: the connection has to reload and replay first.
+pub(crate) fn replay_gone_for(cid: &str, saved_seq: u64, saved_version: Option<i32>) -> String {
+    let body = ReplayGone {
+        code: LiveErrorCode::ReplayGone,
+        cid: Some(cid),
         saved_seq,
         saved_version,
     };

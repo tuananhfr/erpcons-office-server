@@ -12,7 +12,7 @@ use super::Room;
 use crate::{
     Event, Frame, LiveConfig, MemberId, Mode,
     locks::Refusal,
-    log::acked_reserve,
+    log::{Origin, acked_reserve},
     protocol::{self, LiveErrorCode},
 };
 
@@ -104,9 +104,10 @@ impl Room {
     }
 
     /// Whether the member may log an update of `region` now; returns its account if so. Otherwise
-    /// it has had its answer: `FORBIDDEN_MODE`, `LOCK_REQUIRED`, or for a resend of a `cid` already
-    /// taken the same `ack` again. Nothing here touches the node's log budget, so a refused update
-    /// never makes another room shed.
+    /// it has had its answer: `FORBIDDEN_MODE`, `REPLAY_GONE` (no successful replay on this
+    /// connection yet, or since one the room forgot a cid it may resend), `LOCK_REQUIRED`, or for
+    /// a resend of a `cid` already taken the same `ack` again. Nothing here touches the node's log
+    /// budget, so a refused update never makes another room shed.
     pub fn check_update(
         &mut self,
         config: &LiveConfig,
@@ -121,12 +122,18 @@ impl Room {
         }
         // Only accounts edit, so an editor always has one; idempotency must outlive the member id,
         // which a reconnect changes.
-        let Some(actor) = self
-            .members
-            .get(&id)
-            .and_then(|m| m.participant.actor_id())
-            .map(str::to_owned)
-        else {
+        let Some(member) = self.members.get(&id) else {
+            self.settle(config);
+            return None;
+        };
+        if member.synced.is_none() {
+            let gone = self.log.gone();
+            let text = protocol::replay_gone_for(cid, gone.saved_seq, gone.saved_version);
+            self.deliver(id, Event::Send(text.into()));
+            self.settle(config);
+            return None;
+        }
+        let Some(actor) = member.participant.actor_id().map(str::to_owned) else {
             self.settle(config);
             return None;
         };
@@ -168,18 +175,25 @@ impl Room {
         self.seq += 1;
         let seq = self.seq;
         let frame = Frame::split(head, protocol::region_update_tail(seq));
-        let overflowed = self.log.push(
+        let origin = Origin {
+            actor,
+            member: id,
+            cid,
+        };
+        let pushed = self.log.push(
             seq,
             frame.clone(),
-            actor,
-            cid,
+            origin,
             config.max_log_bytes,
             config.max_acked_cids,
         );
+        self.forget(&pushed.forgot);
+        // Replays from the last save now answer REPLAY_GONE until a newer save.
+        let forgot_unsaved = self.forgotten > self.log.saved_seq();
         self.last_update = Some(now);
         self.deliver(id, Event::Send(protocol::ack(cid, seq).into()));
         self.broadcast(&frame, Some(id));
-        if overflowed && !self.save_requested {
+        if (pushed.overflowed || forgot_unsaved) && !self.save_requested {
             self.save_requested = true;
             self.request_save();
         }
@@ -216,11 +230,17 @@ impl Room {
     }
 
     /// The logged updates after `since`, or why they cannot be had; `None` for a stale member.
-    pub fn replay(&self, id: MemberId, since: u64) -> Option<Replay> {
-        if !self.members.contains_key(&id) {
-            return None;
-        }
-        Some(match self.log.since(since, self.seq) {
+    /// Only a replay the room can fully answer lets the member update: one from before a cid the
+    /// room forgot could be followed by that cid, resent.
+    pub fn replay(&mut self, id: MemberId, since: u64) -> Option<Replay> {
+        let answer = if since < self.forgotten {
+            Err(self.log.gone())
+        } else {
+            self.log.since(since, self.seq)
+        };
+        let member = self.members.get_mut(&id)?;
+        member.synced = answer.is_ok().then_some(since);
+        Some(match answer {
             Ok(updates) => Replay::Updates {
                 updates,
                 done: protocol::region_replayed(since, self.seq).into(),
@@ -245,8 +265,9 @@ impl Room {
         }
         let frame = Frame::from(protocol::saved(self.log.saved_seq(), version));
         self.broadcast(&frame, None);
-        // A save older than the trimmed log leaves newcomers unable to replay: ask again.
-        self.save_requested = self.log.short();
+        // A save older than the trimmed log or a forgotten cid leaves newcomers unable to replay:
+        // ask again.
+        self.save_requested = self.log.short() || self.forgotten > self.log.saved_seq();
         if self.save_requested {
             self.request_save();
         }
@@ -274,7 +295,14 @@ impl Room {
         let quiet = self
             .last_update
             .is_some_and(|last| now.saturating_duration_since(last) >= idle);
-        quiet && self.log.release_saved()
+        if !quiet {
+            return false;
+        }
+        let Some(forgot) = self.log.release_saved() else {
+            return false;
+        };
+        self.forget(&forgot);
+        true
     }
 
     /// Sheds the log to at most `target` bytes for the node's budget; the leader is asked to save

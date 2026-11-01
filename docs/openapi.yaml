@@ -161,7 +161,7 @@ info:
     | `ack` | This member's update was taken: `cid`, `seq` |
     | `cursor` | Someone else's cursor: `author`, `region`, `range` |
     | `region.replayed` | End of the answer to `region.replay`: `since`, `seq` |
-    | `save.request` | To the leader only: the room's log overflowed, save now |
+    | `save.request` | To the leader only: the room's log overflowed, or it dropped a `cid` newer than the last save; save now |
     | `saved` | The leader saved: `saved_seq`, `version` |
     | `comments.changed` | A comment thread changed (`thread_id`; `null` when several did, e.g. an anchor batch): read it again with `getCommentThread` or `listComments`. Only to members whose role allows comments (owner, editor, commenter); never any content |
     | `bye` | The server ends the session (`reason`), then closes |
@@ -223,8 +223,14 @@ info:
       so a client sees `ack` and `region.update` in `seq` order. A `cid` resent by the same account (after a
       reconnect too) gets its first `ack` again and is not applied twice; a room remembers the last 4096 `cid`s.
       A room never forgets them for lack of memory, except one whose every update is saved and that took none for
-      10 minutes while the server's budget (below) is full: it gives them up, and a `cid` resent after that is
-      taken as new. A closed room (its last member left or timed out, or
+      10 minutes while the server's budget (below) is full: it gives them up. A forgotten `cid` is never taken as
+      new: a connection's `region.update`s are taken only after a `region.replay` on that connection that the room
+      answered in full (`region.replayed`); before one, after one answered `REPLAY_GONE`, or once the room forgot a
+      `cid` another connection of the same account sent after that replay's `since`, an update is refused with
+      `error` `REPLAY_GONE` (with its `cid`, `saved_seq` and `saved_version`): reload, replay, and send the edits as
+      new updates. A replay from before a forgotten `cid` (also one dropped past the 4096) answers `REPLAY_GONE`
+      even while the log still holds the updates after it; dropping one newer than the last save asks the leader to
+      save (`save.request`), so replays from the save work again. A closed room (its last member left or timed out, or
       the server restarted) is gone with them: a reconnecting client meets that room's successor as `REPLAY_GONE`
       (its `since` is not a seq of the new room), and then reloads the content and derives its edits again instead
       of resending old `cid`s. This is the only safe rule: the server cannot tell whether an unknown `cid` was
@@ -235,7 +241,7 @@ info:
     - *Log and replay.* A room keeps the `region.update`s since the last save, up to 8 MiB; past that the oldest go
       and the leader gets `save.request` (once until the next save; a new leader is asked again). All rooms of a
       server share a budget (512 MiB); a room is charged its kept updates and, from its first update, its 4096
-      remembered `cid`s at their full size (192 KiB). When an update does not fit, rooms idle 10 minutes since their
+      remembered `cid`s at their full size (256 KiB). When an update does not fit, rooms idle 10 minutes since their
       last save first give back their `cid`s (above), then the rooms above their fair share
       (the budget split among open rooms, at least 512 KiB) lose their oldest updates, evened down from the largest,
       the same way as above; rooms within their share never lose theirs. If that is not enough the update is
@@ -1910,7 +1916,7 @@ components:
         connection open.
         `FORBIDDEN_MODE`: the member's mode does not allow the message; `LOCK_REQUIRED`: a `region.update` without a
         covering lock; `LOCK_LIMIT`: the member holds 64 locks; `REPLAY_GONE`: the room no longer holds every update
-        after `since`.
+        after `since`, or (with a `cid`) a `region.update` came before this connection's replay was answered in full.
     LiveError:
       type: object
       required: [type, v, code]

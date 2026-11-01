@@ -53,6 +53,14 @@ impl Ws {
         answer
     }
 
+    /// Replays from the stored content, as a client must before its updates are taken.
+    async fn sync(&mut self, hello: &Value) {
+        let since = hello["saved_seq"].as_u64().expect("saved_seq");
+        self.send_json(&json!({ "type": "region.replay", "v": 1, "since": since }))
+            .await;
+        self.next_of("region.replayed").await;
+    }
+
     async fn edit(&mut self, region: &str, cid: &str, payload: &str) -> Value {
         self.ask(&update(region, cid, payload), &["ack", "error"])
             .await
@@ -164,6 +172,10 @@ async fn updates_need_a_lock_get_a_seq_and_a_resent_cid_is_not_applied_twice() {
     let (mut wb, _) = join(&app, &b, &doc).await;
     let (mut wc, _) = join(&app, &c, &doc).await;
 
+    let unsynced = wa.edit("para:1", "u0", "x").await;
+    assert_eq!(unsynced["code"], "REPLAY_GONE", "no replay yet");
+    assert_eq!(unsynced["cid"], "u0");
+    wa.sync(&hello_a).await;
     let refused = wa.edit("para:1", "u1", "x").await;
     assert_eq!(
         refused,
@@ -192,7 +204,8 @@ async fn updates_need_a_lock_get_a_seq_and_a_resent_cid_is_not_applied_twice() {
 
     // A reconnect resends what it is unsure of: the same ack, nothing applied again.
     wa.vanish();
-    let (mut again, _) = join(&app, &a, &doc).await;
+    let (mut again, hello_again) = join(&app, &a, &doc).await;
+    again.sync(&hello_again).await;
     let ack = again.edit("para:1", "u3", "two").await;
     assert_eq!(ack["seq"], next);
     assert!(
@@ -239,6 +252,7 @@ async fn a_full_log_asks_the_leader_to_save_and_its_save_trims_the_log() {
     let (mut wb, _) = join(&app, &b, &doc).await;
     let saved = hello_a["saved_seq"].as_u64().expect("saved_seq");
     assert_eq!(hello_a["saved_version"], Value::Null);
+    wa.sync(&hello_a).await;
     wa.lock("p", "c1").await;
     let payload = "x".repeat(900);
     let mut last = 0;
@@ -293,7 +307,8 @@ async fn x_live_seq_must_be_digits_and_counts_only_from_the_leader() {
         return;
     };
     let (a, b, _, doc, tag) = shared_document(&app).await;
-    let (mut wa, _) = join(&app, &a, &doc).await;
+    let (mut wa, hello_a) = join(&app, &a, &doc).await;
+    wa.sync(&hello_a).await;
     wa.lock("p", "c1").await;
     let seq = wa.edit("p", "u1", "x").await["seq"].as_u64().expect("seq");
 
@@ -327,6 +342,7 @@ async fn region_updates_may_be_large_on_edit_connections_only() {
     assert_eq!(hello_a["limits"]["max_region_message_bytes"], 1024 * 1024);
     assert_eq!(hello_c["limits"]["max_region_message_bytes"], 16 * 1024);
 
+    wa.sync(&hello_a).await;
     wa.lock("p", "c1").await;
     let big = "x".repeat(200 * 1024);
     assert_eq!(wa.edit("p", "u1", &big).await["type"], "ack");

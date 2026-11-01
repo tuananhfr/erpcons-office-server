@@ -220,7 +220,7 @@ impl Hub {
     pub(crate) fn replay(&self, document: Uuid, member: MemberId, since: u64) -> Option<Replay> {
         self.lock()
             .rooms
-            .get(&document)
+            .get_mut(&document)
             .and_then(|room| room.replay(member, since))
     }
 
