@@ -448,6 +448,36 @@ fn a_replay_sends_the_log_after_since_or_says_it_is_gone() {
 }
 
 #[test]
+fn a_leader_storing_the_saved_seq_again_names_its_newer_version_to_everyone() {
+    let hub = hub(|_| {});
+    let doc = Uuid::new_v4();
+    let mut a = join(&hub, doc, user("a"), Mode::Edit);
+    let b = join(&hub, doc, user("b"), Mode::Edit);
+    a.acquire("p", "c1");
+    let seq = a.update("p", "u1", "one")["seq"].as_u64().expect("seq");
+    hub.saved(doc, "b", seq, 2);
+    assert_eq!(a.next_of("saved")["version"], 2);
+
+    // b drops out; a, now leading alone, stores bytes holding no newer update.
+    drop(b);
+    assert_eq!(a.next_of("leader")["leader"], a.id);
+    hub.saved(doc, "a", seq, 3);
+    assert_eq!(
+        a.next_of("saved"),
+        json!({ "type": "saved", "v": 1, "saved_seq": seq, "version": 3 })
+    );
+    hub.saved(doc, "a", seq, 3);
+    assert!(a.all_of("saved").is_empty(), "the same version again");
+
+    let back = join(&hub, doc, user("b"), Mode::Edit);
+    assert_eq!(back.hello["saved_seq"], seq);
+    assert_eq!(
+        back.hello["saved_version"], 3,
+        "b's next save is based on v3"
+    );
+}
+
+#[test]
 fn a_full_log_asks_the_leader_to_save_and_a_save_trims_it() {
     let hub = hub(|c| c.max_log_bytes = 600);
     let doc = Uuid::new_v4();
@@ -492,7 +522,7 @@ fn a_full_log_asks_the_leader_to_save_and_a_save_trims_it() {
     let after = b.replay(last);
     assert_eq!(after.len(), 3, "two updates after the save, then the end");
     assert_eq!(b.replay(saved)[0]["saved_version"], 9);
-    hub.saved(doc, "b", last, 10);
+    hub.saved(doc, "b", last, 9);
     assert!(a.all_of("saved").is_empty(), "not newer than the last save");
 
     let c = join(&hub, doc, user("c"), Mode::View);

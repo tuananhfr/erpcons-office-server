@@ -258,9 +258,9 @@ info:
     - *Saves.* `hello` carries `saved_seq` (the seq the stored content holds every update up to: the last
       leader's save, or the room's starting seq) and `saved_version` (the version that save made; `null` until a
       leader saved in this room). The leader saves with `saveContent` and `X-Live-Seq` (the last update its bytes
-      hold); after the commit, if the caller's account leads the room and the seq is newer than `saved_seq` and was
-      issued by this room, the room records it, drops the updates up to it and sends everyone `saved`. Otherwise the
-      header changes nothing.
+      hold); after the commit, if the caller's account leads the room and the seq was issued by this room and is
+      newer than `saved_seq`, or equals it with a newer version than `saved_version`, the room records it, drops the
+      updates up to it and sends everyone `saved`. Otherwise the header changes nothing.
     - *Cursors* go to everyone else at once and are never logged: at most 20 a second (bursts of 20) without
       counting towards the message rate; past that they count and are not relayed. A member whose queue is half
       full misses cursors, so they never get it dropped. `range` is at most 1 KiB; `cid` is 1 to 128 visible ASCII

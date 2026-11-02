@@ -207,10 +207,13 @@ impl RoomLog {
             .collect())
     }
 
-    /// The document was saved with every update up to `seq`; false when `seq` is not newer than
-    /// the last save or not a seq of this room.
+    /// The document was saved with every update up to `seq`; false when `seq` is older than the
+    /// last save, not a seq of this room, or the last save's seq again without a newer version.
     pub fn saved(&mut self, seq: u64, version: i32, last: u64) -> bool {
-        if seq <= self.saved_seq || seq > last {
+        // The same seq stored again (a leader's bytes with no newer update) is still the newest
+        // version: newcomers must base their saves on it, or theirs conflict.
+        let not_newer = seq == self.saved_seq && self.saved_version.is_some_and(|v| v >= version);
+        if seq < self.saved_seq || seq > last || not_newer {
             return false;
         }
         self.saved_seq = seq;
@@ -299,7 +302,7 @@ mod tests {
         log.push(11, text("a"), origin("u", "c1"), 100, 100);
         log.push(12, text("b"), origin("u", "c2"), 100, 100);
         log.push(13, text("c"), origin("u", "c3"), 100, 100);
-        assert!(!log.saved(10, 2, 13), "not newer");
+        assert!(!log.saved(9, 2, 13), "older");
         assert!(!log.saved(14, 2, 13), "not issued");
         assert!(log.saved(12, 2, 13));
         assert_eq!(log.saved_seq(), 12);
@@ -308,6 +311,30 @@ mod tests {
         assert!(log.since(11, 13).is_err());
         assert_eq!(log.since(12, 13).expect("after the save").len(), 1);
         assert!(!log.short());
+    }
+
+    #[test]
+    fn the_same_seq_saved_again_counts_only_as_a_newer_version() {
+        let mut log = RoomLog::new(10);
+        log.push(11, text("a"), origin("u", "c1"), 100, 100);
+        log.push(12, text("b"), origin("u", "c2"), 100, 100);
+        assert!(log.saved(11, 2, 12));
+        assert!(!log.saved(11, 2, 12), "same version");
+        assert!(!log.saved(11, 1, 12), "older version");
+        assert!(log.saved(11, 3, 12));
+        assert_eq!((log.saved_seq(), log.saved_version()), (11, Some(3)));
+        assert_eq!(
+            log.since(11, 12).expect("the update after the save").len(),
+            1
+        );
+        assert!(!log.saved(10, 4, 12), "an older seq never counts");
+
+        let mut fresh = RoomLog::new(10);
+        assert!(
+            fresh.saved(10, 2, 10),
+            "a first save holding no update still names the version"
+        );
+        assert_eq!(fresh.saved_version(), Some(2));
     }
 
     #[test]

@@ -250,8 +250,8 @@ impl Room {
     }
 
     /// `actor_id` saved version `version` holding every update up to `live_seq`. Counts only from
-    /// the leader's account and for a seq of this room newer than the last save: the log is
-    /// trimmed and everyone hears `saved`.
+    /// the leader's account and for a seq of this room newer than the last save (or the same seq
+    /// as a newer version): the log is trimmed and everyone hears `saved`.
     pub fn saved(&mut self, config: &LiveConfig, actor_id: &str, live_seq: u64, version: i32) {
         let leads = self
             .leader
