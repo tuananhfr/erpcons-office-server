@@ -182,6 +182,15 @@ impl Comment {
             deleted_at: row.deleted_at,
         }
     }
+
+    /// As a link holder sees it: nobody's name, nothing theirs (the live room's rule).
+    pub(crate) fn anonymous(self) -> Self {
+        Self {
+            author_name: String::new(),
+            mine: false,
+            ..self
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -228,6 +237,17 @@ impl Thread {
             resolved_at: row.resolved_at,
             comments,
         })
+    }
+
+    /// As a link holder sees it: nobody's name, nothing theirs (the live room's rule).
+    pub(crate) fn anonymous(self) -> Self {
+        Self {
+            created_by_name: String::new(),
+            resolved_by_name: self.resolved_by_name.as_ref().map(|_| String::new()),
+            mine: false,
+            comments: self.comments.into_iter().map(Comment::anonymous).collect(),
+            ..self
+        }
     }
 }
 

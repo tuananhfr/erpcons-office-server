@@ -1,7 +1,8 @@
 //! Comment mail (plan v2 §5, plan-m5): a reply reaches the others who wrote in the thread; new
 //! threads on a document reach its owner, gathered into one mail per 15 minutes. Mails say where
 //! to look, never what was written, and name the title only when the server is configured to.
-//! Recipients who may not read the comments get none, checked when queued and again when due.
+//! Recipients who may not write comments (viewers read them, but get no mail) get none, checked
+//! when queued and again when due.
 use async_trait::async_trait;
 use office_db::{ItemState, PgConnection, actor_emails, comments, locks, mail_outbox};
 use office_mail::{
@@ -24,15 +25,16 @@ const REPLY_BATCH_SECS: i64 = 2 * 60;
 const COMMENT_MAILS_PER_RECIPIENT: u32 = 50;
 const COMMENT_KINDS: [&str; 2] = [KIND_COMMENT_REPLY, KIND_COMMENT_THREADS];
 
-/// Whether someone with `grant` (or none) on a document owned by `owner_id` may read its comments.
-fn reads_comments(actor_id: &str, owner_id: &str, grant: Option<&str>, accessed: Shares) -> bool {
+/// Whether someone with `grant` (or none) on a document owned by `owner_id` takes part in its
+/// comments (owner, editor, commenter), which is who gets comment mail.
+fn takes_part(actor_id: &str, owner_id: &str, grant: Option<&str>, accessed: Shares) -> bool {
     let role = Role::of_id(Some(actor_id), owner_id, grant.and_then(Role::parse_grant));
     let resource = Resource::Document {
         role,
         trashed: accessed.trashed,
         editors_can_share: accessed.editors_can_share,
     };
-    authorize(None, resource, Action::ReadComments).is_ok()
+    authorize(None, resource, Action::Comment).is_ok()
 }
 
 /// What of the document, besides roles, an access decision reads.
@@ -127,7 +129,7 @@ impl Documents {
                 continue;
             };
             let grant = person.grant_role.as_deref();
-            if !reads_comments(&person.actor_id, accessed.owner_id(), grant, shares) {
+            if !takes_part(&person.actor_id, accessed.owner_id(), grant, shares) {
                 continue;
             }
             let waiting = mail_outbox::comment_pending(
@@ -230,7 +232,7 @@ impl Documents {
             editors_can_share: row.editors_can_share,
         };
         let grant = row.grant_role.as_deref();
-        if !reads_comments(&notice.recipient_id, &row.document.owner_id, grant, shares) {
+        if !takes_part(&notice.recipient_id, &row.document.owner_id, grant, shares) {
             return Ok(None);
         }
         match kind {

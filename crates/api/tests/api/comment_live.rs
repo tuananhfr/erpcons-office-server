@@ -1,4 +1,5 @@
-//! `comments.changed` over a real WebSocket: to members whose role allows comments, never content.
+//! `comments.changed` over a real WebSocket: to every member, viewers and link holders included
+//! (they read comments too), never content.
 use std::time::Duration;
 
 use reqwest::Method;
@@ -21,7 +22,7 @@ fn changes(messages: &[Value]) -> Vec<Value> {
 }
 
 #[tokio::test]
-async fn only_editing_and_commenting_members_hear_comment_changes() {
+async fn every_member_hears_comment_changes() {
     let Some(app) = TestApp::spawn().await else {
         return;
     };
@@ -35,7 +36,7 @@ async fn only_editing_and_commenting_members_hear_comment_changes() {
 
     let thread = start_ok(&app, &cast, &cast.c).await;
     let tid = id(&thread);
-    for ws in [&mut wa, &mut wb, &mut wc] {
+    for ws in [&mut wa, &mut wb, &mut wc, &mut wd, &mut wl] {
         let heard = ws.next_of("comments.changed").await;
         assert_eq!(
             heard,
@@ -48,21 +49,13 @@ async fn only_editing_and_commenting_members_hear_comment_changes() {
         .send_json(Method::PATCH, &cast.path("/anchors"), &cast.c, &batch)
         .await;
     assert_eq!(anchors.status(), 200);
-    let heard = changes(&wa.listen(QUIET).await);
-    assert_eq!(
-        heard,
-        [
-            json!({ "type": "comments.changed", "v": 1, "thread_id": tid }),
-            json!({ "type": "comments.changed", "v": 1, "thread_id": null })
-        ]
-    );
-    for ws in [&mut wd, &mut wl] {
+    let expected = [
+        json!({ "type": "comments.changed", "v": 1, "thread_id": tid }),
+        json!({ "type": "comments.changed", "v": 1, "thread_id": null }),
+    ];
+    for ws in [&mut wa, &mut wd, &mut wl] {
         let messages = ws.listen(QUIET).await;
-        assert_eq!(
-            changes(&messages),
-            Vec::<Value>::new(),
-            "viewers hear nothing"
-        );
+        assert_eq!(changes(&messages), expected);
         let text = serde_json::to_string(&messages).expect("json");
         assert!(!text.contains("Nội dung"), "{text}");
     }
@@ -76,14 +69,10 @@ async fn only_editing_and_commenting_members_hear_comment_changes() {
 
     // A refused change is not announced.
     let refused = app
-        .request(
-            Method::POST,
-            &cast.path(&format!("/{tid}/resolve")),
-            &cast.c,
-        )
+        .request(Method::DELETE, &cast.path(&format!("/{tid}")), &cast.c)
         .send()
         .await
-        .expect("resolve");
+        .expect("delete thread");
     assert_eq!(refused.status(), 403);
     assert_eq!(changes(&wa.listen(QUIET).await), Vec::<Value>::new());
 }

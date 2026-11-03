@@ -47,17 +47,7 @@ impl Documents {
                 };
                 access::load(&self.db, &c, id, Action::Read).await?
             }
-            LiveViewer::Link(hash) => {
-                let row = office_db::access::of_link(&self.db, hash.as_str())
-                    .await
-                    .map_err(DocError::db)?;
-                let accessed = access::decide(row, None, true, Action::Read)?;
-                // A link opens its own document only.
-                if accessed.row.id != id {
-                    return Err(DocError::NotFound);
-                }
-                accessed
-            }
+            LiveViewer::Link(hash) => access::load_link(&self.db, hash, id, Action::Read).await?,
         };
         let access = LiveAccess {
             role: accessed.role,

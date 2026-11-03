@@ -108,9 +108,13 @@ async fn each_role_gets_what_the_matrix_says() {
     let people = [&cast.a, &cast.b, &cast.c, &cast.d, &cast.e];
     let target = start_ok(&app, &cast, &cast.a).await;
     let tid = id(&target);
-    let reads = [200, 200, 200, 403, 404];
+    let reads = [200, 200, 200, 200, 404];
     let writes = [201, 201, 201, 403, 404];
-    for (who, (&read, &write)) in people.iter().zip(reads.iter().zip(&writes)) {
+    let changes = [200, 200, 200, 403, 404];
+    for (who, (&read, (&write, &change))) in people
+        .iter()
+        .zip(reads.iter().zip(writes.iter().zip(&changes)))
+    {
         let list = call(&app, Method::GET, &cast.path(""), who, None).await;
         assert_eq!(list, read, "list");
         let one = call(&app, Method::GET, &cast.path(&format!("/{tid}")), who, None).await;
@@ -136,9 +140,9 @@ async fn each_role_gets_what_the_matrix_says() {
             Some(batch),
         )
         .await;
-        assert_eq!(anchors, read, "anchors");
+        assert_eq!(anchors, change, "anchors");
         // D and E try A's first comment; the others their own reply.
-        let own = if read == 200 {
+        let own = if change == 200 {
             let thread = ok_json(app.get_as(&cast.path(&format!("/{tid}")), who).await, 200).await;
             thread["comments"]
                 .as_array()
@@ -154,12 +158,13 @@ async fn each_role_gets_what_the_matrix_says() {
         let comment = cast.path(&format!("/{tid}/comments/{own}"));
         let edit = json!({ "body": "Sửa lại" });
         let edited = call(&app, Method::PATCH, &comment, who, Some(edit)).await;
-        assert_eq!(edited, read, "edit");
+        assert_eq!(edited, change, "edit");
         let deleted = call(&app, Method::DELETE, &comment, who, None).await;
-        assert_eq!(deleted, if read == 200 { 204 } else { read }, "delete");
+        assert_eq!(deleted, if change == 200 { 204 } else { change }, "delete");
     }
     let moderate = [200, 200, 403, 403, 404];
-    for (who, &expected) in people.iter().zip(&moderate) {
+    let delete_thread = [204, 204, 403, 403, 404];
+    for (who, (&expected, &delete)) in people.iter().zip(moderate.iter().zip(&delete_thread)) {
         let thread = start_ok(&app, &cast, &cast.c).await;
         let t = id(&thread);
         let resolve = call(
@@ -214,40 +219,105 @@ async fn each_role_gets_what_the_matrix_says() {
             None,
         )
         .await;
-        assert_eq!(
-            gone,
-            if expected == 200 { 204 } else { expected },
-            "delete thread"
-        );
+        assert_eq!(gone, delete, "delete thread");
     }
 }
 
+/// A GET of `path` with the link token and no PI token.
+async fn by_link(app: &TestApp, path: &str, token: &str) -> Response {
+    app.http
+        .get(app.url(path))
+        .header("x-link-token", token)
+        .send()
+        .await
+        .expect("request")
+}
+
+/// Link holders read the threads (anonymous, as in the live room: nobody's name); they write nothing.
 #[tokio::test]
-async fn link_holders_never_reach_comments() {
+async fn link_holders_read_comments_without_names() {
     let Some(app) = TestApp::spawn().await else {
         return;
     };
     let cast = Cast::new(&app, "link").await;
     let thread = start_ok(&app, &cast, &cast.c).await;
-    let anonymous = app
-        .http
-        .get(app.url(&cast.path("")))
-        .header("x-link-token", &cast.link)
-        .send()
-        .await
-        .expect("request");
-    expect_error(anonymous, 401, "UNAUTHENTICATED", false).await;
-    let signed_in = app
+    let tid = id(&thread);
+    reply_ok(&app, &cast, &cast.b, &tid, "Đã sửa").await;
+    let resolved = app
         .request(
-            Method::GET,
-            &cast.path(&format!("/{}", id(&thread))),
-            &cast.e,
+            Method::POST,
+            &cast.path(&format!("/{tid}/resolve")),
+            &cast.b,
         )
+        .send()
+        .await
+        .expect("resolve");
+    assert_eq!(resolved.status(), 200);
+
+    let listed = ok_json(by_link(&app, &cast.path(""), &cast.link).await, 200).await;
+    assert_eq!(listed["can_resolve"], false);
+    let threads = listed["threads"].as_array().expect("threads");
+    assert_eq!(threads.len(), 1);
+    let seen = &threads[0];
+    assert_eq!(seen["id"], tid.as_str());
+    assert_eq!(seen["status"], "resolved");
+    assert_eq!(seen["anchor"]["offset"], 3);
+    assert_eq!(seen["mine"], false);
+    assert_eq!(seen["created_by_name"], "");
+    assert_eq!(seen["resolved_by_name"], "");
+    let comments = seen["comments"].as_array().expect("comments");
+    assert_eq!(comments.len(), 2);
+    assert_eq!(comments[1]["body"], "Đã sửa");
+    assert!(
+        comments
+            .iter()
+            .all(|c| c["author_name"] == "" && c["mine"] == false)
+    );
+    let text = listed.to_string();
+    for hidden in ["Cúc", "Bình", "usr_", "@erpcons.test"] {
+        assert!(!text.contains(hidden), "{hidden} in {text}");
+    }
+    let one = ok_json(
+        by_link(&app, &cast.path(&format!("/{tid}")), &cast.link).await,
+        200,
+    )
+    .await;
+    assert_eq!(one["comments"][0]["author_name"], "");
+    let audited = app
+        .count("SELECT count(*) FROM audit_events WHERE action = 'link.comments' AND actor_kind = 'link'")
+        .await;
+    assert_eq!(audited, 2, "each read is audited as a link view");
+
+    // The link token alone decides, whoever is signed in.
+    let signed_in = app
+        .request(Method::GET, &cast.path(&format!("/{tid}")), &cast.e)
         .header("x-link-token", &cast.link)
         .send()
         .await
         .expect("request");
-    expect_error(signed_in, 404, "NOT_FOUND", false).await;
+    assert_eq!(signed_in.status(), 200);
+    let wrong = by_link(&app, &cast.path(""), &"x".repeat(43)).await;
+    expect_error(wrong, 404, "NOT_FOUND", false).await;
+    let other = upload(&app, &cast.a, "other").await.0;
+    let elsewhere = by_link(
+        &app,
+        &format!("/api/v1/documents/{other}/comments"),
+        &cast.link,
+    )
+    .await;
+    expect_error(elsewhere, 404, "NOT_FOUND", false).await;
+
+    // Writes ignore the link token.
+    let anonymous_post = app
+        .http
+        .post(app.url(&cast.path("")))
+        .header("x-link-token", &cast.link)
+        .header("idempotency-key", new_key())
+        .json(&anchor("p1"))
+        .send()
+        .await
+        .expect("request");
+    expect_error(anonymous_post, 401, "UNAUTHENTICATED", false).await;
     let posted = app
         .request(Method::POST, &cast.path(""), &cast.e)
         .header("x-link-token", &cast.link)
@@ -257,8 +327,23 @@ async fn link_holders_never_reach_comments() {
         .await
         .expect("request");
     expect_error(posted, 404, "NOT_FOUND", false).await;
-    let viewer = app.get_as(&cast.path(""), &cast.d).await;
-    expect_error(viewer, 403, "FORBIDDEN", false).await;
+
+    let viewer = ok_json(app.get_as(&cast.path(""), &cast.d).await, 200).await;
+    assert_eq!(viewer["can_resolve"], false);
+    assert_eq!(viewer["threads"][0]["created_by_name"], "Cúc Commenter");
+
+    let off = app
+        .request(
+            Method::DELETE,
+            &format!("/api/v1/documents/{}/link", cast.doc),
+            &cast.a,
+        )
+        .send()
+        .await
+        .expect("disable");
+    assert_eq!(off.status(), 204);
+    let gone = by_link(&app, &cast.path(""), &cast.link).await;
+    expect_error(gone, 404, "NOT_FOUND", false).await;
 }
 
 #[tokio::test]
@@ -621,13 +706,8 @@ async fn a_revoked_commenter_is_refused_at_the_next_request() {
         .send_json(Method::PATCH, &permission, &cast.a, &demote)
         .await;
     assert_eq!(response.status(), 200);
-    expect_error(
-        app.get_as(&cast.path(""), &cast.c).await,
-        403,
-        "FORBIDDEN",
-        false,
-    )
-    .await;
+    let read = ok_json(app.get_as(&cast.path(""), &cast.c).await, 200).await;
+    assert_eq!(read["can_resolve"], false, "a viewer only reads");
     let edit = app
         .send_json(Method::PATCH, &mine, &cast.c, &json!({ "body": "x" }))
         .await;

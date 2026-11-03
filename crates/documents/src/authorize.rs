@@ -83,7 +83,7 @@ pub enum Action {
     ChangeShareSettings,
     /// Remove one's own permission.
     Leave,
-    /// See the comment threads (plan-m5: not viewers, not link holders).
+    /// See the comment threads: everyone who can open the document (link holders without names).
     ReadComments,
     /// Start a thread, reply, edit or delete one's own comment, and report re-placed anchors.
     Comment,
@@ -163,7 +163,8 @@ fn document_allows(role: Role, action: Action, editors_can_share: bool) -> bool 
         Action::ListPermissions => role != Link,
         Action::Share => role == Owner || (role == Editor && editors_can_share),
         Action::Leave => matches!(role, Editor | Commenter | Viewer),
-        Action::ReadComments | Action::Comment => matches!(role, Owner | Editor | Commenter),
+        Action::ReadComments => true,
+        Action::Comment => matches!(role, Owner | Editor | Commenter),
         Action::ModerateComments => matches!(role, Owner | Editor),
     }
 }
@@ -226,7 +227,8 @@ mod tests {
             Action::ListPermissions => [true, true, true, true, false],
             Action::Share => [true, editors_can_share, false, false, false],
             Action::Leave => [false, true, true, true, false],
-            Action::ReadComments | Action::Comment => [true, true, true, false, false],
+            Action::ReadComments => [true; 5],
+            Action::Comment => [true, true, true, false, false],
             Action::ModerateComments => [true, true, false, false, false],
         }
     }

@@ -1,4 +1,5 @@
-//! Comment threads of a document (plan-m5). Writes share a per-actor rate on top of the usual ones.
+//! Comment threads of a document (plan-m5). Reads are open to link holders too (`X-Link-Token`);
+//! writes share a per-actor rate on top of the usual ones.
 use std::time::Instant;
 
 use axum::{
@@ -12,7 +13,7 @@ use office_identity::Actor;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use super::respond::caller;
+use super::{link_or_actor::LinkOrActor, respond::caller};
 use crate::{
     ApiError, AppState, Authenticated, ErrorCode, RequestId,
     dto::{AnchorsUpdatedDto, CommentDto, ThreadDto, ThreadsDto},
@@ -41,9 +42,9 @@ fn anchor_of(map: &Map<String, Value>) -> Result<Anchor, ApiError> {
 pub(crate) async fn list(
     State(state): State<AppState>,
     Extension(rid): Extension<RequestId>,
-    Authenticated(actor): Authenticated,
     ApiPath(id): ApiPath<Uuid>,
     ApiQuery(query): ApiQuery<CommentsQuery>,
+    reader: LinkOrActor,
 ) -> Result<Response, ApiError> {
     let status = query.status.as_deref().map(status_of).transpose()?;
     let page = PageQuery {
@@ -51,23 +52,43 @@ pub(crate) async fn list(
         limit: query.limit,
     }
     .page()?;
-    let threads = state
-        .docs
-        .list_comments(&caller(&actor, &rid), id, status, &page)
-        .await?;
+    let threads = match reader {
+        LinkOrActor::Actor(Authenticated(actor)) => {
+            state
+                .docs
+                .list_comments(&caller(&actor, &rid), id, status, &page)
+                .await?
+        }
+        LinkOrActor::Link(hash) => {
+            state
+                .docs
+                .list_link_comments(&hash, id, status, &page, rid.as_str())
+                .await?
+        }
+    };
     Ok(Json(ThreadsDto::from(&threads)).into_response())
 }
 
 pub(crate) async fn get(
     State(state): State<AppState>,
     Extension(rid): Extension<RequestId>,
-    Authenticated(actor): Authenticated,
     ApiPath((id, thread_id)): ApiPath<(Uuid, Uuid)>,
+    reader: LinkOrActor,
 ) -> Result<Response, ApiError> {
-    let thread = state
-        .docs
-        .get_comment_thread(&caller(&actor, &rid), id, thread_id)
-        .await?;
+    let thread = match reader {
+        LinkOrActor::Actor(Authenticated(actor)) => {
+            state
+                .docs
+                .get_comment_thread(&caller(&actor, &rid), id, thread_id)
+                .await?
+        }
+        LinkOrActor::Link(hash) => {
+            state
+                .docs
+                .get_link_comment_thread(&hash, id, thread_id, rid.as_str())
+                .await?
+        }
+    };
     Ok(Json(ThreadDto::from(&thread)).into_response())
 }
 

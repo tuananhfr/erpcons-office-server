@@ -7,7 +7,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::Caller;
-use crate::{Action, DocError, Document, Resource, Role, authorize};
+use crate::{Action, DocError, Document, LinkHash, Resource, Role, authorize};
 
 /// A document the caller may act on, with how it may. No `Debug`: holds the title.
 pub(super) struct Accessed {
@@ -96,6 +96,24 @@ pub(super) async fn load(
         .await
         .map_err(DocError::db)?;
     decide(row, Some(c.actor), false, action)
+}
+
+/// The document `id` if the public link whose token hashes to `hash` opens it and allows `action`.
+pub(super) async fn load_link(
+    db: impl PgExecutor<'_>,
+    hash: &LinkHash,
+    id: Uuid,
+    action: Action,
+) -> Result<Accessed, DocError> {
+    let row = office_db::access::of_link(db, hash.as_str())
+        .await
+        .map_err(DocError::db)?;
+    let accessed = decide(row, None, true, action)?;
+    // A link opens its own document only.
+    if accessed.row.id != id {
+        return Err(DocError::NotFound);
+    }
+    Ok(accessed)
 }
 
 /// As [`load`], and not in the trash: a trashed document can be read, not changed.

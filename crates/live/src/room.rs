@@ -216,16 +216,11 @@ impl Room {
         }
     }
 
-    /// Tells the members whose role allows comments (edit or comment, editors waiting for a slot
-    /// included) that a thread changed; viewers and link holders never see comments.
+    /// Tells every member that a thread changed: whoever can open the document reads its comments
+    /// (viewers and link holders too). The frame names the thread only.
     pub fn comments_changed(&mut self, config: &LiveConfig, thread: Option<Uuid>) {
         let frame = Frame::from(protocol::comments_changed(thread));
-        let targets: Vec<MemberId> = self
-            .members
-            .iter()
-            .filter(|(_, m)| m.allowed != Mode::View)
-            .map(|(id, _)| *id)
-            .collect();
+        let targets: Vec<MemberId> = self.members.keys().copied().collect();
         for id in targets {
             self.deliver(id, Event::Send(frame.clone()));
         }

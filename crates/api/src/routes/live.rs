@@ -6,18 +6,17 @@ use std::{net::IpAddr, time::Instant};
 use axum::{
     Extension, Json,
     extract::{
-        FromRequestParts, State,
+        State,
         ws::{WebSocketUpgrade, rejection::WebSocketUpgradeRejection},
     },
-    http::request::Parts,
     response::Response,
 };
-use office_documents::{LinkHash, LiveViewer};
+use office_documents::LiveViewer;
 use office_live::TicketError;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::public_links;
+use super::link_or_actor::LinkOrActor;
 use crate::{
     ApiError, AppState, Authenticated, ErrorCode, RequestId,
     dto::LiveTicketDto,
@@ -25,29 +24,6 @@ use crate::{
     live::{self, Session, Viewer, mode_of},
     rate_limit::ClientKey,
 };
-
-/// Who asks for a ticket: the link holder when `X-Link-Token` is sent, else the bearer's actor.
-pub(crate) enum TicketCaller {
-    Actor(Authenticated),
-    Link(LinkHash),
-}
-
-impl FromRequestParts<AppState> for TicketCaller {
-    type Rejection = ApiError;
-
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
-        if parts.headers.contains_key(public_links::TOKEN_HEADER) {
-            public_links::check_rate(state, parts.extensions.get::<ClientKey>().copied())?;
-            let token = public_links::token(&parts.headers)?;
-            // A malformed token is as unknown as a wrong one.
-            let hash = LinkHash::of(token).ok_or(ErrorCode::NotFound)?;
-            return Ok(Self::Link(hash));
-        }
-        Authenticated::from_request_parts(parts, state)
-            .await
-            .map(Self::Actor)
-    }
-}
 
 fn address(client: Option<Extension<ClientKey>>) -> Option<IpAddr> {
     client.and_then(|Extension(ClientKey(ip))| ip)
@@ -58,17 +34,17 @@ pub(crate) async fn ticket(
     Extension(rid): Extension<RequestId>,
     client: Option<Extension<ClientKey>>,
     ApiPath(id): ApiPath<Uuid>,
-    caller: TicketCaller,
+    caller: LinkOrActor,
 ) -> Result<Json<LiveTicketDto>, ApiError> {
     let (viewer, link_owner) = match caller {
-        TicketCaller::Actor(Authenticated(actor)) => {
+        LinkOrActor::Actor(Authenticated(actor)) => {
             state
                 .docs
                 .live_access(id, LiveViewer::Actor(&actor))
                 .await?;
             (Viewer::Actor(actor), None)
         }
-        TicketCaller::Link(hash) => {
+        LinkOrActor::Link(hash) => {
             let (_, owner) = state.docs.live_link_access(id, &hash, rid.as_str()).await?;
             (Viewer::Link(hash), Some(owner))
         }
