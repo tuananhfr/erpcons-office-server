@@ -160,6 +160,21 @@ pub async fn lock_thread(
     .map(|row| row.is_some())
 }
 
+/// As [`lock_thread`], returning who started the thread; `None` when it is not one of `document_id`.
+pub async fn lock_thread_author(
+    conn: &mut PgConnection,
+    document_id: Uuid,
+    thread_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT created_by FROM comment_threads WHERE document_id = $1 AND id = $2 FOR UPDATE",
+    )
+    .bind(document_id)
+    .bind(thread_id)
+    .fetch_optional(conn)
+    .await
+}
+
 /// Comments of `thread_ids`, by thread then creation.
 pub async fn comments_of(
     db: impl PgExecutor<'_>,

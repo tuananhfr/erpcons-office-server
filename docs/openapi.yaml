@@ -41,7 +41,7 @@ info:
     | `listComments`, `getCommentThread` (also link holders, with `X-Link-Token`, without names) | ✓ | ✓ | ✓ | ✓ |
     | `createCommentThread`, `replyToCommentThread`, `updateCommentAnchors` | ✓ | ✓ | ✓ | |
     | `updateComment`, `deleteComment` (the caller's own comments only; someone else's is 403) | ✓ | ✓ | ✓ | |
-    | `resolveCommentThread`, `reopenCommentThread` | ✓ | ✓ | | |
+    | `resolveCommentThread`, `reopenCommentThread` | ✓ | ✓ | the threads it started | |
     | `deleteCommentThread` | ✓ | ✓ | | |
 
     Nobody changes their own permission with `updatePermission` (403); leaving with `removePermission` stays open.
@@ -119,8 +119,9 @@ info:
     every name (`created_by_name`, `resolved_by_name`, `author_name`) is the empty string, `mine` is `false` and
     `can_resolve` `false`. Owner, editors and commenters start threads and reply; a viewer gets 403 `FORBIDDEN`, anyone
     who cannot open the document 404. A comment's author edits and deletes it (a deleted comment keeps its place with
-    `body` `null`; a thread left with no words is deleted). Owner and editors resolve, reopen and delete whole threads.
-    Editors report where they placed
+    `body` `null`; a thread left with no words is deleted). Owner and editors resolve, reopen and delete any thread; a
+    thread's author resolves and reopens it while its role may comment (a commenter its own threads, not others'), and
+    deleting a whole thread stays the owner's and editors'. Editors report where they placed
     threads again with `updateCommentAnchors` (owner, editors and commenters, since any of them may open a newer
     version). In the trash the owner still reads the comments, and every change answers 404 like any change of a
     trashed document. A purge deletes the threads. Bounds: a comment is 1–10 000 characters (not only blanks, no control
@@ -952,7 +953,7 @@ paths:
     post:
       operationId: resolveCommentThread
       tags: [comments]
-      summary: Mark a thread resolved (owner, editor); one already resolved keeps who resolved it
+      summary: Mark a thread resolved (owner, editor, or its author while commenter); one already resolved keeps who resolved it
       responses:
         '200':
           description: The thread.
@@ -970,7 +971,7 @@ paths:
     post:
       operationId: reopenCommentThread
       tags: [comments]
-      summary: Open a resolved thread again, as `open` (owner, editor); any other thread is returned unchanged
+      summary: Open a resolved thread again, as `open` (owner, editor, or its author while commenter); any other thread is returned unchanged
       responses:
         '200':
           description: The thread.
@@ -1808,7 +1809,7 @@ components:
           type: array
           items: { $ref: '#/components/schemas/CommentThread' }
         next_cursor: { type: [string, 'null'] }
-        can_resolve: { type: boolean, description: 'The caller may resolve, reopen and delete anyone''s threads (owner, editor; `false` in the trash and for link holders).' }
+        can_resolve: { type: boolean, description: 'The caller may resolve, reopen and delete anyone''s threads (owner, editor; `false` in the trash and for link holders). A thread''s author may also resolve and reopen it while commenter.' }
     Version:
       type: object
       required: [version, size, sha256, author_name, created_at]

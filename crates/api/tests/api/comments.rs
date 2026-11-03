@@ -162,7 +162,8 @@ async fn each_role_gets_what_the_matrix_says() {
         let deleted = call(&app, Method::DELETE, &comment, who, None).await;
         assert_eq!(deleted, if change == 200 { 204 } else { change }, "delete");
     }
-    let moderate = [200, 200, 403, 403, 404];
+    // C started each thread: its author resolves and reopens it, but deleting it stays the owner's and editors'.
+    let moderate = [200, 200, 200, 403, 404];
     let delete_thread = [204, 204, 403, 403, 404];
     for (who, (&expected, &delete)) in people.iter().zip(moderate.iter().zip(&delete_thread)) {
         let thread = start_ok(&app, &cast, &cast.c).await;
@@ -221,6 +222,76 @@ async fn each_role_gets_what_the_matrix_says() {
         .await;
         assert_eq!(gone, delete, "delete thread");
     }
+}
+
+/// Resolving one's own thread needs a role that may comment; someone else's needs owner or editor.
+#[tokio::test]
+async fn a_commenter_resolves_only_their_own_threads() {
+    let Some(app) = TestApp::spawn().await else {
+        return;
+    };
+    let cast = Cast::new(&app, "own resolve").await;
+    let status = |thread: &str, what: &str, who: &str| {
+        let path = cast.path(&format!("/{thread}/{what}"));
+        let who = who.to_owned();
+        let app = &app;
+        async move {
+            app.request(Method::POST, &path, &who)
+                .send()
+                .await
+                .expect("status")
+        }
+    };
+    let theirs = id(&start_ok(&app, &cast, &cast.b).await);
+    expect_error(
+        status(&theirs, "resolve", &cast.c).await,
+        403,
+        "FORBIDDEN",
+        false,
+    )
+    .await;
+    assert_eq!(status(&theirs, "resolve", &cast.b).await.status(), 200);
+    expect_error(
+        status(&theirs, "reopen", &cast.c).await,
+        403,
+        "FORBIDDEN",
+        false,
+    )
+    .await;
+
+    let own = id(&start_ok(&app, &cast, &cast.c).await);
+    let resolved = ok_json(status(&own, "resolve", &cast.c).await, 200).await;
+    assert_eq!(resolved["status"], "resolved");
+    assert_eq!(resolved["resolved_by_name"], "Cúc Commenter");
+    let listed = ok_json(app.get_as(&cast.path(""), &cast.c).await, 200).await;
+    assert_eq!(
+        listed["can_resolve"], false,
+        "can_resolve still means anyone's threads"
+    );
+    let reopened = ok_json(status(&own, "reopen", &cast.c).await, 200).await;
+    assert_eq!(reopened["status"], "open");
+
+    // Demoted to viewer, C keeps reading but no longer resolves even its own thread.
+    let permission = format!(
+        "/api/v1/documents/{}/permissions/{}",
+        cast.doc, cast.grants[1]
+    );
+    let demoted = app
+        .send_json(
+            Method::PATCH,
+            &permission,
+            &cast.a,
+            &json!({ "role": "viewer" }),
+        )
+        .await;
+    assert_eq!(demoted.status(), 200);
+    expect_error(
+        status(&own, "resolve", &cast.c).await,
+        403,
+        "FORBIDDEN",
+        false,
+    )
+    .await;
 }
 
 /// A GET of `path` with the link token and no PI token.

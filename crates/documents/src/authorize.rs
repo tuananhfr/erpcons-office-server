@@ -85,9 +85,10 @@ pub enum Action {
     Leave,
     /// See the comment threads: everyone who can open the document (link holders without names).
     ReadComments,
-    /// Start a thread, reply, edit or delete one's own comment, and report re-placed anchors.
+    /// Start a thread, reply, edit or delete one's own comment, resolve or reopen one's own thread,
+    /// and report re-placed anchors.
     Comment,
-    /// Resolve, reopen and delete whole threads.
+    /// Resolve, reopen and delete anyone's threads.
     ModerateComments,
 }
 

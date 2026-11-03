@@ -1,5 +1,6 @@
-//! Whole threads (plan-m5): owner and editors resolve, reopen and delete them; owner, editors and
-//! commenters report where their editor placed threads again (`orphaned` when it could not).
+//! Whole threads (plan-m5): owner and editors resolve, reopen and delete any thread, and a thread's
+//! author resolves and reopens it while its role may comment; owner, editors and commenters report
+//! where their editor placed threads again (`orphaned` when it could not).
 use office_db::comments::{self, AnchorChange as AnchorChangeRow};
 use uuid::Uuid;
 
@@ -27,6 +28,11 @@ impl Moderation {
             Self::Reopen => "comment.reopen",
             Self::Delete => "comment.thread_delete",
         }
+    }
+
+    /// Whether the thread's author may do it without moderating the document.
+    fn by_author(self) -> bool {
+        matches!(self, Self::Resolve | Self::Reopen)
     }
 }
 
@@ -85,12 +91,20 @@ impl Documents {
     ) -> Result<(), DocError> {
         self.ensure_caller(c).await?;
         let mut tx = self.begin().await?;
-        access::load_for_update(&mut tx, c, id, Action::ModerateComments).await?;
-        if !comments::lock_thread(&mut tx, id, thread_id)
+        let least = if what.by_author() {
+            Action::Comment
+        } else {
+            Action::ModerateComments
+        };
+        let accessed = access::load_for_update(&mut tx, c, id, least).await?;
+        let Some(author) = comments::lock_thread_author(&mut tx, id, thread_id)
             .await
             .map_err(DocError::db)?
-        {
+        else {
             return Err(DocError::NotFound);
+        };
+        if !(what.by_author() && author == c.actor_id()) {
+            accessed.allows(c.actor, Action::ModerateComments)?;
         }
         let changed = match what {
             Moderation::Resolve => comments::resolve(&mut tx, id, thread_id, c.actor_id()).await,
